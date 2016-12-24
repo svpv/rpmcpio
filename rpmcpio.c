@@ -1,5 +1,6 @@
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
 #include <rpm/rpmlib.h>
 #include "rpmcpio.h"
 #include "errexit.h"
@@ -24,7 +25,8 @@ struct rpmcpio {
     // n3: next entry pos
     int n1, n2, n3;
     struct cpioent ent;
-    char fname[4096];
+    // two more bytes for padding, see below
+    char fname[PATH_MAX+2];
     char rpmfname[];
 };
 
@@ -116,9 +118,15 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	out[i] = u;
     }
 
+    // cpio magic is 6 bytes, but filename is padded to a multiple of four bytes
     unsigned fnamesize = ((cpio->ent.fnamelen + 1) & ~3) + 2;
-    if (fnamesize > sizeof cpio->fname)
+    // at this stage, fnamelen includes '\0', and fname starts with "./"
+    if (cpio->ent.fnamelen > PATH_MAX + 1)
 	die("%s: cpio filename too long", cpio->rpmfname);
+    assert(fnamesize <= sizeof cpio->fname);
+    // the shortest filename is "./\0"
+    if (cpio->ent.fnamelen < 3)
+	die("%s: cpio filename too short", cpio->rpmfname);
     if (Fread(cpio->fname, fnamesize, 1, cpio->fd) != 1)
 	die("%s: cannot read cpio filename", cpio->rpmfname);
 
@@ -126,7 +134,14 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     cpio->n2 = cpio->n1 + cpio->ent.size;
     cpio->n3 = (cpio->n2 + 3) & ~3;
 
-    if (strcmp(cpio->fname, "TRAILER!!!") == 0)
+    if (memcmp(cpio->fname, "TRAILER!!!", cpio->ent.fnamelen) == 0)
 	return NULL;
+
+    if (memcmp(cpio->fname, "./", 2) != 0)
+	die("%s: %s: invalid cpio filename", cpio->rpmfname, cpio->fname);
+
+    memmove(cpio->fname, cpio->fname + 1, cpio->ent.fnamelen - 1);
+    cpio->ent.fnamelen -= 2;
+
     return &cpio->ent;
 }

@@ -10,7 +10,7 @@ struct cpioent {
     unsigned size;
     unsigned dev_major, dev_minor;
     unsigned rdev_major, rdev_minor;
-    unsigned fnamelen;
+    unsigned fnamelen; // strlen(fname) < PATH_MAX
     unsigned checksum;
     char fname[];
 };
