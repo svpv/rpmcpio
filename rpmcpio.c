@@ -145,3 +145,16 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 
     return &cpio->ent;
 }
+
+int rpmcpio_read(struct rpmcpio *cpio, void *buf, int n)
+{
+    int left = cpio->n2 - cpio->n1;
+    if (n > left)
+	n = left;
+    if (n < 1)
+	return 0;
+    if (Fread(buf, n, 1, cpio->fd) != 1)
+	die("%s: %s: cannot read cpio data", cpio->rpmfname, cpio->fname);
+    cpio->n1 += n;
+    return n;
+}
