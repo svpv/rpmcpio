@@ -30,21 +30,21 @@ struct rpmcpio {
     char rpmfname[];
 };
 
-struct rpmcpio *rpmcpio_open(const char *fname)
+struct rpmcpio *rpmcpio_open(const char *rpmfname)
 {
-    const char *bn = strrchr(fname, '/');
-    bn = bn ? bn + 1 : fname;
-    size_t len = strlen(bn);
-    struct rpmcpio *cpio = xmalloc(sizeof(*cpio) + len + 1);
-    memcpy(cpio->rpmfname, bn, len + 1);
-
-    FD_t fd = Fopen(fname, "r.ufdio");
+    FD_t fd = Fopen(rpmfname, "r.ufdio");
+    rpmfname = xbasename(rpmfname);
     if (Ferror(fd))
-	die("%s: cannot open", bn);
+	die("%s: cannot open", rpmfname);
+
     Header h;
     int rc = rpmReadPackageHeader(fd, &h, NULL, NULL, NULL);
     if (rc)
-	die("%s: cannot read rpm header", bn);
+	die("%s: cannot read rpm header", rpmfname);
+
+    size_t len = strlen(rpmfname);
+    struct rpmcpio *cpio = xmalloc(sizeof(*cpio) + len + 1);
+    memcpy(cpio->rpmfname, rpmfname, len + 1);
 
     char mode[] = "r.gzdio";
     const char *compr = getStringTag(h, RPMTAG_PAYLOADCOMPRESSOR);
@@ -52,7 +52,7 @@ struct rpmcpio *rpmcpio_open(const char *fname)
 	mode[2] = compr[0];
     cpio->fd = Fdopen(fd, mode);
     if (Ferror(cpio->fd))
-	die("%s: cannot open payload", bn);
+	die("%s: cannot open payload", rpmfname);
     if (cpio->fd != fd)
 	Fclose(fd);
 
