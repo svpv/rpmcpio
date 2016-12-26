@@ -18,6 +18,13 @@ static const char *getStringTag(Header h, int tag)
    return NULL;
 }
 
+static int getFileCount(Header h)
+{
+   int count;
+   int ret = headerGetEntry(h, RPMTAG_BASENAMES, NULL, NULL, &count);
+   return ret == 1 ? count : 0;
+}
+
 struct rpmcpio {
     FD_t fd;
     // n1: current data pos
@@ -30,7 +37,7 @@ struct rpmcpio {
     char rpmfname[];
 };
 
-struct rpmcpio *rpmcpio_open(const char *rpmfname)
+struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
 {
     FD_t fd = Fopen(rpmfname, "r.ufdio");
     rpmfname = xbasename(rpmfname);
@@ -42,6 +49,15 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname)
     if (rc)
 	die("%s: cannot read rpm header", rpmfname);
 
+    int ne = getFileCount(h);
+    if (nent)
+	*nent = ne;
+    if (ne == 0) {
+	headerFree(h);
+	Fclose(fd);
+	return NULL;
+    }
+
     size_t len = strlen(rpmfname);
     struct rpmcpio *cpio = xmalloc(sizeof(*cpio) + len + 1);
     memcpy(cpio->rpmfname, rpmfname, len + 1);
@@ -50,6 +66,7 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname)
     const char *compr = getStringTag(h, RPMTAG_PAYLOADCOMPRESSOR);
     if (compr && compr[0] && compr[1] == 'z')
 	mode[2] = compr[0];
+    headerFree(h);
     cpio->fd = Fdopen(fd, mode);
     if (Ferror(cpio->fd))
 	die("%s: cannot open payload", rpmfname);

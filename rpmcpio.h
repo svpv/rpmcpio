@@ -1,4 +1,4 @@
-struct rpmcpio *rpmcpio_open(const char *rpmfname);
+struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent);
 
 struct cpioent {
     unsigned ino;
