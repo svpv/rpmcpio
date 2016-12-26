@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <string.h>
 #include <assert.h>
 #include <limits.h>
@@ -32,6 +33,7 @@ struct rpmcpio {
     // n3: next entry pos
     int n1, n2, n3;
     int nent;
+    union { bool rpm; } src;
     struct cpioent ent;
     // two more bytes for padding, see below
     char fname[PATH_MAX+2];
@@ -46,7 +48,8 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
 	die("%s: cannot open", rpmfname);
 
     Header h;
-    int rc = rpmReadPackageHeader(fd, &h, NULL, NULL, NULL);
+    union { int rpm; } src;
+    int rc = rpmReadPackageHeader(fd, &h, &src.rpm, NULL, NULL);
     if (rc)
 	die("%s: cannot read rpm header", rpmfname);
 
@@ -77,6 +80,7 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
     cpio->n1 = cpio->n2 = cpio->n3 = 0;
     cpio->nent = ne;
     cpio->ent.no = -1;
+    cpio->src.rpm = src.rpm;
     return cpio;
 }
 
@@ -141,31 +145,36 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 
     // cpio magic is 6 bytes, but filename is padded to a multiple of four bytes
     unsigned fnamesize = ((cpio->ent.fnamelen + 1) & ~3) + 2;
-    // at this stage, fnamelen includes '\0', and fname starts with "./"
-    if (cpio->ent.fnamelen > PATH_MAX + 1)
+    // At this stage, fnamelen includes '\0', and fname should start with "./".
+    // The leading dot will be stripped implicitly by copying to &fname[-1].
+    // src.rpm is the exeption: there should be no prefix, and nothing will be stripped.
+    bool dot = !cpio->src.rpm;
+    if (cpio->ent.fnamelen - dot > PATH_MAX)
 	die("%s: cpio filename too long", cpio->rpmfname);
-    assert(fnamesize <= sizeof cpio->fname);
-    // the shortest filename is "./\0"
-    if (cpio->ent.fnamelen < 3)
+    assert(fnamesize - dot <= sizeof cpio->fname);
+    // The shortest filename is "./\0", except for src.rpm,
+    // for which the shortest filename is "a\0".
+    if (cpio->ent.fnamelen < 3U - dot)
 	die("%s: cpio filename too short", cpio->rpmfname);
-    if (Fread(cpio->fname, fnamesize, 1, cpio->fd) != 1)
+    char *fnamedest = cpio->fname - dot;
+    if (Fread(fnamedest, fnamesize, 1, cpio->fd) != 1)
 	die("%s: cannot read cpio filename", cpio->rpmfname);
 
     cpio->n1 += fnamesize;
     cpio->n2 = cpio->n1 + cpio->ent.size;
     cpio->n3 = (cpio->n2 + 3) & ~3;
 
-    if (memcmp(cpio->fname, "TRAILER!!!", cpio->ent.fnamelen) == 0)
+    if (memcmp(fnamedest, "TRAILER!!!", cpio->ent.fnamelen) == 0)
 	return NULL;
 
     if (++cpio->ent.no >= cpio->nent)
-	die("%s: %s: unexpected extra cpio entry", cpio->rpmfname, cpio->fname);
+	die("%s: %s: unexpected extra cpio entry", cpio->rpmfname, fnamedest);
 
-    if (memcmp(cpio->fname, "./", 2) != 0)
-	die("%s: %s: invalid cpio filename", cpio->rpmfname, cpio->fname);
+    bool has_prefix = memcmp(fnamedest, "./", 2) == 0;
+    if (dot != has_prefix)
+	die("%s: %s: invalid cpio filename", cpio->rpmfname, fnamedest);
 
-    memmove(cpio->fname, cpio->fname + 1, cpio->ent.fnamelen - 1);
-    cpio->ent.fnamelen -= 2;
+    cpio->ent.fnamelen--;
 
     return &cpio->ent;
 }
