@@ -1,4 +1,5 @@
 struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent);
+void rpmcpio_close(struct rpmcpio *cpio);
 
 struct cpioent {
     unsigned ino;

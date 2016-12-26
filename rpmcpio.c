@@ -183,3 +183,9 @@ int rpmcpio_read(struct rpmcpio *cpio, void *buf, int n)
     cpio->n1 += n;
     return n;
 }
+
+void rpmcpio_close(struct rpmcpio *cpio)
+{
+    Fclose(cpio->fd);
+    free(cpio);
+}
