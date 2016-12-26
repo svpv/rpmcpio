@@ -37,21 +37,22 @@ struct rpmcpio {
     struct cpioent ent;
     // two more bytes for padding, see below
     char fname[PATH_MAX+2];
+    const char *rpmbname;
     char rpmfname[];
 };
 
 struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
 {
+    const char *rpmbname = xbasename(rpmfname);
     FD_t fd = Fopen(rpmfname, "r.ufdio");
-    rpmfname = xbasename(rpmfname);
     if (Ferror(fd))
-	die("%s: cannot open", rpmfname);
+	die("%s: cannot open", rpmbname);
 
     Header h;
     union { int rpm; } src;
     int rc = rpmReadPackageHeader(fd, &h, &src.rpm, NULL, NULL);
     if (rc)
-	die("%s: cannot read rpm header", rpmfname);
+	die("%s: cannot read rpm header", rpmbname);
 
     int ne = getFileCount(h);
     if (nent)
@@ -64,7 +65,8 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
 
     size_t len = strlen(rpmfname);
     struct rpmcpio *cpio = xmalloc(sizeof(*cpio) + len + 1);
-    memcpy(cpio->rpmfname, rpmfname, len + 1);
+    cpio->ent.rpmfname = memcpy(cpio->rpmfname, rpmfname, len + 1);
+    cpio->ent.rpmbname = cpio->rpmbname = cpio->rpmfname + (rpmbname - rpmfname);
 
     char mode[] = "r.gzdio";
     const char *compr = getStringTag(h, RPMTAG_PAYLOADCOMPRESSOR);
@@ -73,7 +75,7 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
     headerFree(h);
     cpio->fd = Fdopen(fd, mode);
     if (Ferror(cpio->fd))
-	die("%s: cannot open payload", rpmfname);
+	die("%s: cannot open payload", rpmbname);
     if (cpio->fd != fd)
 	Fclose(fd);
 
@@ -92,7 +94,7 @@ static void rpmcpio_skip(struct rpmcpio *cpio, int n)
     do {
 	int m = (n > BUFSIZ) ? BUFSIZ : n;
 	if (Fread(buf, m, 1, cpio->fd) != 1)
-	    die("%s: cannot skip cpio bytes", cpio->rpmfname);
+	    die("%s: cannot skip cpio bytes", cpio->rpmbname);
 	n -= m;
     }
     while (n > 0);
@@ -125,9 +127,9 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     }
     char buf[110];
     if (Fread(buf, 110, 1, cpio->fd) != 1)
-	die("%s: cannot read cpio header", cpio->rpmfname);
+	die("%s: cannot read cpio header", cpio->rpmbname);
     if (memcmp(buf, "070701", 6) != 0)
-	die("%s: bad cpio header magic", cpio->rpmfname);
+	die("%s: bad cpio header magic", cpio->rpmbname);
     cpio->n1 += 110;
 
     unsigned *out = (unsigned *) &cpio->ent;
@@ -137,7 +139,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	for (int j = 0; j < 8; j++) {
 	    unsigned v = hex[(unsigned char) s[j]];
 	    if (v == 0xee)
-		die("%s: invalid header", cpio->rpmfname);
+		die("%s: invalid header", cpio->rpmbname);
 	    u = (u << 4) | v;
 	}
 	out[i] = u;
@@ -150,15 +152,15 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     // src.rpm is the exeption: there should be no prefix, and nothing will be stripped.
     bool dot = !cpio->src.rpm;
     if (cpio->ent.fnamelen - dot > PATH_MAX)
-	die("%s: cpio filename too long", cpio->rpmfname);
+	die("%s: cpio filename too long", cpio->rpmbname);
     assert(fnamesize - dot <= sizeof cpio->fname);
     // The shortest filename is "./\0", except for src.rpm,
     // for which the shortest filename is "a\0".
     if (cpio->ent.fnamelen < 3U - dot)
-	die("%s: cpio filename too short", cpio->rpmfname);
+	die("%s: cpio filename too short", cpio->rpmbname);
     char *fnamedest = cpio->fname - dot;
     if (Fread(fnamedest, fnamesize, 1, cpio->fd) != 1)
-	die("%s: cannot read cpio filename", cpio->rpmfname);
+	die("%s: cannot read cpio filename", cpio->rpmbname);
 
     cpio->n1 += fnamesize;
     cpio->n2 = cpio->n1 + cpio->ent.size;
@@ -168,11 +170,11 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	return NULL;
 
     if (++cpio->ent.no >= cpio->nent)
-	die("%s: %s: unexpected extra cpio entry", cpio->rpmfname, fnamedest);
+	die("%s: %s: unexpected extra cpio entry", cpio->rpmbname, fnamedest);
 
     bool has_prefix = memcmp(fnamedest, "./", 2) == 0;
     if (dot != has_prefix)
-	die("%s: %s: invalid cpio filename", cpio->rpmfname, fnamedest);
+	die("%s: %s: invalid cpio filename", cpio->rpmbname, fnamedest);
 
     cpio->ent.fnamelen--;
 
@@ -188,7 +190,7 @@ int rpmcpio_read(struct rpmcpio *cpio, void *buf, int n)
     if (n < 1)
 	return 0;
     if (Fread(buf, n, 1, cpio->fd) != 1)
-	die("%s: %s: cannot read cpio data", cpio->rpmfname, cpio->fname);
+	die("%s: %s: cannot read cpio data", cpio->rpmbname, cpio->fname);
     cpio->n1 += n;
     return n;
 }

@@ -14,7 +14,9 @@ struct cpioent {
     unsigned fnamelen; // strlen(fname) < PATH_MAX
     unsigned checksum;
     int no; // this entry's number, starting with 0
-    char pad[4];
+    const char *rpmfname;
+    const char *rpmbname;
+    char pad[sizeof(void *)];
     char fname[];
 };
 
