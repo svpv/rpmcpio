@@ -12,6 +12,7 @@ struct cpioent {
     unsigned rdev_major, rdev_minor;
     unsigned fnamelen; // strlen(fname) < PATH_MAX
     unsigned checksum;
+    int no; // this entry's number, starting with 0
     char fname[];
 };
 

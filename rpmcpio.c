@@ -31,6 +31,7 @@ struct rpmcpio {
     // n2: end data pos
     // n3: next entry pos
     int n1, n2, n3;
+    int nent;
     struct cpioent ent;
     // two more bytes for padding, see below
     char fname[PATH_MAX+2];
@@ -74,12 +75,15 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
 	Fclose(fd);
 
     cpio->n1 = cpio->n2 = cpio->n3 = 0;
+    cpio->nent = ne;
+    cpio->ent.no = -1;
     return cpio;
 }
 
 static void rpmcpio_skip(struct rpmcpio *cpio, int n)
 {
     assert(n > 0);
+    assert(cpio->ent.no >= 0);
     char buf[BUFSIZ];
     do {
 	int m = (n > BUFSIZ) ? BUFSIZ : n;
@@ -154,6 +158,9 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     if (memcmp(cpio->fname, "TRAILER!!!", cpio->ent.fnamelen) == 0)
 	return NULL;
 
+    if (++cpio->ent.no >= cpio->nent)
+	die("%s: %s: unexpected extra cpio entry", cpio->rpmfname, cpio->fname);
+
     if (memcmp(cpio->fname, "./", 2) != 0)
 	die("%s: %s: invalid cpio filename", cpio->rpmfname, cpio->fname);
 
@@ -165,6 +172,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 
 int rpmcpio_read(struct rpmcpio *cpio, void *buf, int n)
 {
+    assert(cpio->ent.no >= 0);
     int left = cpio->n2 - cpio->n1;
     if (n > left)
 	n = left;
