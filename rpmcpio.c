@@ -34,6 +34,7 @@ struct rpmcpio {
     int n1, n2, n3;
     int nent;
     union { bool rpm; } src;
+    struct { char buf[1024]; int size; } peek;
     struct cpioent ent;
     // two more bytes for padding, see below
     char fname[PATH_MAX+2];
@@ -83,6 +84,7 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
     cpio->nent = ne;
     cpio->ent.no = -1;
     cpio->src.rpm = src.rpm;
+    cpio->peek.size = 0;
     return cpio;
 }
 
@@ -181,17 +183,45 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     return &cpio->ent;
 }
 
+#define READ(cpio, buf, n)			\
+    do {					\
+	assert(n >= 0);				\
+	assert(cpio->ent.no >= 0);		\
+	int left = cpio->n2 - cpio->n1;		\
+	assert(left >= 0);			\
+	if (n > left)				\
+	    n = left;				\
+	if (n == 0)				\
+	    break;				\
+	if (Fread(buf, n, 1, cpio->fd) != 1)	\
+	    die("%s: %s: cannot read cpio data", cpio->rpmbname, cpio->fname); \
+	cpio->n1 += n;				\
+    }						\
+    while (0)
+
+int rpmcpio_peek(struct rpmcpio *cpio, void *buf, int n)
+{
+    assert(cpio->peek.size == 0);
+    assert(n <= (int) sizeof cpio->peek.buf);
+    READ(cpio, buf, n);
+    if (n == 0)
+	return 0;
+    memcpy(cpio->peek.buf, buf, n);
+    cpio->peek.size = n;
+    return n;
+}
+
 int rpmcpio_read(struct rpmcpio *cpio, void *buf, int n)
 {
-    assert(cpio->ent.no >= 0);
-    int left = cpio->n2 - cpio->n1;
-    if (n > left)
-	n = left;
-    if (n < 1)
-	return 0;
-    if (Fread(buf, n, 1, cpio->fd) != 1)
-	die("%s: %s: cannot read cpio data", cpio->rpmbname, cpio->fname);
-    cpio->n1 += n;
+    if (cpio->peek.size) {
+	assert(n >= cpio->peek.size);
+	memcpy(buf, cpio->peek.buf, cpio->peek.size);
+	buf += cpio->peek.size;
+	n -= cpio->peek.size;
+    }
+    READ(cpio, buf, n);
+    n += cpio->peek.size;
+    cpio->peek.size = 0;
     return n;
 }
 

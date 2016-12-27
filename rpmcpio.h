@@ -22,4 +22,5 @@ struct cpioent {
 
 const struct cpioent *rpmcpio_next(struct rpmcpio *cpio);
 
+int rpmcpio_peek(struct rpmcpio *cpio, void *buf, int n);
 int rpmcpio_read(struct rpmcpio *cpio, void *buf, int n);
