@@ -3,27 +3,18 @@
 #include <assert.h>
 #include <limits.h>
 #include <rpm/rpmlib.h>
+#include <rpm/rpmts.h>
 #include "rpmcpio.h"
 #include "errexit.h"
 
-static const char *getStringTag(Header h, int tag)
+static unsigned getFileCount(Header h)
 {
-   int type;
-   int count;
-   void *data;
-   int rc = headerGetEntry(h, tag, &type, &data, &count);
-   if (rc == 1) {
-      assert(type == RPM_STRING_TYPE && count == 1);
-      return (const char *)data;
-   }
-   return NULL;
-}
-
-static int getFileCount(Header h)
-{
-   int count;
-   int ret = headerGetEntry(h, RPMTAG_BASENAMES, NULL, NULL, &count);
-   return ret == 1 ? count : 0;
+    // Getting DIRINDEXES is cheaper than BASENAMES, no parsing.
+    struct rpmtd_s td;
+    int rc = headerGet(h, RPMTAG_DIRINDEXES, &td, HEADERGET_MINMEM);
+    if (rc == 1)
+	return td.count ? td.count : -1; // zero count not permitted
+    return 0;
 }
 
 struct rpmcpio {
@@ -49,13 +40,23 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
     if (Ferror(fd))
 	die("%s: cannot open", rpmbname);
 
-    Header h;
-    union { int rpm; } src;
-    int rc = rpmReadPackageHeader(fd, &h, &src.rpm, NULL, NULL);
-    if (rc)
-	die("%s: cannot read rpm header", rpmbname);
+    static rpmts ts;
+    if (ts == NULL) {
+	// TODO: atomic exchange or else free
+	ts = rpmtsCreate();
+	assert(ts);
+	rpmtsSetVSFlags(ts, (rpmVSFlags) -1);
+    }
 
-    int ne = getFileCount(h);
+    Header h = NULL;
+    int rc = rpmReadPackageFile(ts, fd, rpmfname, &h);
+    if (rc != RPMRC_OK && rc != RPMRC_NOTTRUSTED && rc != RPMRC_NOKEY)
+	die("%s: cannot read rpm header", rpmbname);
+    assert(h);
+
+    unsigned ne = getFileCount(h);
+    if (ne == -1)
+	die("%s: bad file count", rpmbname);
     if (nent)
 	*nent = ne;
     if (ne == 0) {
@@ -70,10 +71,9 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
     cpio->ent.rpmbname = cpio->rpmbname = cpio->rpmfname + (rpmbname - rpmfname);
 
     char mode[] = "r.gzdio";
-    const char *compr = getStringTag(h, RPMTAG_PAYLOADCOMPRESSOR);
+    const char *compr = headerGetString(h, RPMTAG_PAYLOADCOMPRESSOR);
     if (compr && compr[0] && compr[1] == 'z')
 	mode[2] = compr[0];
-    headerFree(h);
     cpio->fd = Fdopen(fd, mode);
     if (Ferror(cpio->fd))
 	die("%s: cannot open payload", rpmbname);
@@ -83,8 +83,10 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
     cpio->n1 = cpio->n2 = cpio->n3 = 0;
     cpio->nent = ne;
     cpio->ent.no = -1;
-    cpio->src.rpm = src.rpm;
+    cpio->src.rpm = !headerGetString(h, RPMTAG_SOURCERPM);
     cpio->peek.size = 0;
+
+    headerFree(h);
     return cpio;
 }
 
@@ -95,7 +97,7 @@ static void rpmcpio_skip(struct rpmcpio *cpio, int n)
     char buf[BUFSIZ];
     do {
 	int m = (n > BUFSIZ) ? BUFSIZ : n;
-	if (Fread(buf, m, 1, cpio->fd) != 1)
+	if (Fread(buf, 1, m, cpio->fd) != m)
 	    die("%s: cannot skip cpio bytes", cpio->rpmbname);
 	n -= m;
     }
@@ -128,7 +130,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	cpio->n1 = cpio->n3;
     }
     char buf[110];
-    if (Fread(buf, 110, 1, cpio->fd) != 1)
+    if (Fread(buf, 1, 110, cpio->fd) != 110)
 	die("%s: cannot read cpio header", cpio->rpmbname);
     if (memcmp(buf, "070701", 6) != 0)
 	die("%s: bad cpio header magic", cpio->rpmbname);
@@ -161,7 +163,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     if (cpio->ent.fnamelen < 3U - dot)
 	die("%s: cpio filename too short", cpio->rpmbname);
     char *fnamedest = cpio->fname - dot;
-    if (Fread(fnamedest, fnamesize, 1, cpio->fd) != 1)
+    if (Fread(fnamedest, 1, fnamesize, cpio->fd) != fnamesize)
 	die("%s: cannot read cpio filename", cpio->rpmbname);
 
     cpio->n1 += fnamesize;
@@ -193,7 +195,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	    n = left;				\
 	if (n == 0)				\
 	    break;				\
-	if (Fread(buf, n, 1, cpio->fd) != 1)	\
+	if (Fread(buf, 1, n, cpio->fd) != n)	\
 	    die("%s: %s: cannot read cpio data", cpio->rpmbname, cpio->fname); \
 	cpio->n1 += n;				\
     }						\
