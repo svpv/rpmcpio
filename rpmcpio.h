@@ -14,10 +14,8 @@ struct cpioent {
     unsigned fnamelen; // strlen(fname) < PATH_MAX
     unsigned checksum;
     unsigned no; // this entry's number, no >= 0 && no < nent
-    const char *rpmfname;
-    const char *rpmbname;
-    char pad[sizeof(void *)];
-    char fname[];
+    char pad[4];
+    char fname[]; // PATH_MAX = 4096, including trailing '\0'
 };
 
 const struct cpioent *rpmcpio_next(struct rpmcpio *cpio);

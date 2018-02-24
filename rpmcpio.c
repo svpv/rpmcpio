@@ -1,7 +1,6 @@
 #include <stdbool.h>
 #include <string.h>
 #include <assert.h>
-#include <limits.h>
 #include <rpm/rpmlib.h>
 #include <rpm/rpmts.h>
 #include "rpmcpio.h"
@@ -27,11 +26,11 @@ struct rpmcpio {
     union { bool rpm; } src;
     struct { char buf[1024]; int size; } peek;
     struct cpioent ent;
-    // two more bytes for padding, see below
-    char fname[PATH_MAX+2];
-    const char *rpmbname;
-    char rpmfname[];
+    char fname[4096];
+    char rpmbname[];
 };
+
+static_assert(sizeof(struct cpioent) == 64, "nice cpioent size");
 
 struct rpmcpio *rpmcpio_open(const char *rpmfname, unsigned *nent)
 {
@@ -65,10 +64,9 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, unsigned *nent)
 	return NULL;
     }
 
-    size_t len = strlen(rpmfname);
+    size_t len = strlen(rpmbname);
     struct rpmcpio *cpio = xmalloc(sizeof(*cpio) + len + 1);
-    cpio->ent.rpmfname = memcpy(cpio->rpmfname, rpmfname, len + 1);
-    cpio->ent.rpmbname = cpio->rpmbname = cpio->rpmfname + (rpmbname - rpmfname);
+    memcpy(cpio->rpmbname, rpmbname, len + 1);
 
     char mode[] = "r.gzdio";
     const char *compr = headerGetString(h, RPMTAG_PAYLOADCOMPRESSOR);
@@ -173,7 +171,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     // The leading dot will be stripped implicitly by copying to &fname[-1].
     // src.rpm is the exeption: there should be no prefix, and nothing will be stripped.
     bool dot = !cpio->src.rpm;
-    if (cpio->ent.fnamelen - dot > PATH_MAX)
+    if (cpio->ent.fnamelen - dot > sizeof cpio->fname)
 	die("%s: cpio filename too long", cpio->rpmbname);
     assert(fnamesize - dot <= sizeof cpio->fname);
     // The shortest filename is "./\0", except for src.rpm,
