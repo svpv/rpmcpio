@@ -8,7 +8,7 @@ struct cpioent {
     unsigned gid;
     unsigned nlink;
     unsigned mtime;
-    unsigned size;
+    unsigned long long size;
     unsigned dev_major, dev_minor;
     unsigned rdev_major, rdev_minor;
     unsigned fnamelen; // strlen(fname) < PATH_MAX

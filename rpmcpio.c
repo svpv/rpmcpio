@@ -123,6 +123,30 @@ static const unsigned char hex[256] = {
     0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
 };
 
+// Parse 8-digit hex number.
+static inline unsigned hex1(const char *s, const char *rpmbname)
+{
+    unsigned u = 0;
+    for (int i = 0; i < 8; i++) {
+	unsigned v = hex[(unsigned char) s[i]];
+	if (v == 0xee) {
+	    u = -1;
+	    break;
+	}
+	u = (u << 4) | v;
+    }
+    if (u == -1)
+	die("%s: bad cpio hex value", rpmbname);
+    return u;
+}
+
+// Convert 6 hex fields.
+static void hex6(const char s[6*8], unsigned v[6], const char *rpmbname)
+{
+    for (int i = 0; i < 6; i++)
+	v[i] = hex1(s + 8 * i, rpmbname);
+}
+
 const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 {
     if (cpio->n3 > cpio->n1) {
@@ -136,18 +160,12 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	die("%s: bad cpio header magic", cpio->rpmbname);
     cpio->n1 += 110;
 
-    unsigned *out = (unsigned *) &cpio->ent;
-    for (int i = 0; i < 13; i++) {
-	const char *s = buf + 6 + i * 8;
-	unsigned u = 0;
-	for (int j = 0; j < 8; j++) {
-	    unsigned v = hex[(unsigned char) s[j]];
-	    if (v == 0xee)
-		die("%s: invalid header", cpio->rpmbname);
-	    u = (u << 4) | v;
-	}
-	out[i] = u;
-    }
+    // Parse hex fields.
+    const char *s = buf + 6;
+    unsigned *v = &cpio->ent.ino;
+    hex6(s, v, cpio->rpmbname); // 32-bit fields before cpio->ent.size
+    cpio->ent.size = hex1(s + 6 * 8, cpio->rpmbname); // the 7th, 64-bit
+    hex6(s + 7 * 8, v + 8, cpio->rpmbname); // after cpio->ent.size
 
     // cpio magic is 6 bytes, but filename is padded to a multiple of four bytes
     unsigned fnamesize = ((cpio->ent.fnamelen + 1) & ~3) + 2;
