@@ -23,7 +23,7 @@ struct rpmcpio {
     // n2: end data pos
     // n3: next entry pos
     int n1, n2, n3;
-    int nent;
+    unsigned nent;
     union { bool rpm; } src;
     struct { char buf[1024]; int size; } peek;
     struct cpioent ent;
@@ -33,7 +33,7 @@ struct rpmcpio {
     char rpmfname[];
 };
 
-struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent)
+struct rpmcpio *rpmcpio_open(const char *rpmfname, unsigned *nent)
 {
     const char *rpmbname = xbasename(rpmfname);
     FD_t fd = Fopen(rpmfname, "r.ufdio");

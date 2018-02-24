@@ -1,4 +1,4 @@
-struct rpmcpio *rpmcpio_open(const char *rpmfname, int *nent);
+struct rpmcpio *rpmcpio_open(const char *rpmfname, unsigned *nent);
 void rpmcpio_close(struct rpmcpio *cpio);
 
 struct cpioent {
@@ -13,7 +13,7 @@ struct cpioent {
     unsigned rdev_major, rdev_minor;
     unsigned fnamelen; // strlen(fname) < PATH_MAX
     unsigned checksum;
-    int no; // this entry's number, starting with 0
+    unsigned no; // this entry's number, no >= 0 && no < nent
     const char *rpmfname;
     const char *rpmbname;
     char pad[sizeof(void *)];
