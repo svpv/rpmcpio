@@ -196,7 +196,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     if (dot != has_prefix)
 	die("%s: %s: invalid cpio filename", cpio->rpmbname, fnamedest);
 
-    cpio->ent.fnamelen--;
+    cpio->ent.fnamelen -= 1 + dot;
 
     return &cpio->ent;
 }
