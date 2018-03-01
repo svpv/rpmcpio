@@ -22,11 +22,14 @@
 #include <string.h>
 #include <assert.h>
 #include <limits.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <rpm/rpmlib.h>
 #include <rpm/rpmts.h>
 #include "rpmcpio.h"
+#include "reada.h"
+#include "zreader.h"
 #include "errexit.h"
 
 static unsigned getFileCount(Header h)
@@ -40,12 +43,14 @@ static unsigned getFileCount(Header h)
 }
 
 struct rpmcpio {
-    FD_t fd;
     unsigned long long curpos; // current data pos
     unsigned long long endpos; // end data pos
     unsigned nent;
     struct { unsigned ino, mode, nlink, cnt; } hard;
     union { bool rpm; } src;
+    struct fda fda;
+    char fdabuf[NREADA];
+    struct zreader z;
     struct cpioent ent;
     char fname[4096];
     char rpmbname[];
@@ -88,15 +93,14 @@ struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
     struct rpmcpio *cpio = xmalloc(sizeof(*cpio) + len + 1);
     memcpy(cpio->rpmbname, rpmbname, len + 1);
 
-    char mode[] = "r.gzdio";
-    const char *compr = headerGetString(h, RPMTAG_PAYLOADCOMPRESSOR);
-    if (compr && compr[0] && compr[1] == 'z')
-	mode[2] = compr[0];
-    cpio->fd = Fdopen(fd, mode);
-    if (Ferror(cpio->fd))
-	die("%s: cannot open payload", rpmbname);
-    if (cpio->fd != fd)
-	Fclose(fd);
+    const char *zprog = headerGetString(h, RPMTAG_PAYLOADCOMPRESSOR);
+    if (!(zprog && *zprog))
+	zprog = "gzip";
+    if (!zreader_init(&cpio->z, zprog))
+	die("%s: cannot initialize %s decompressor", rpmbname, zprog);
+
+    cpio->fda = (struct fda) { dup(Fileno(fd)), cpio->fdabuf };
+    Fclose(fd);
 
     cpio->curpos = cpio->endpos = 0;
     cpio->nent = ne;
@@ -108,6 +112,17 @@ struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
     return cpio;
 }
 
+static inline size_t zread(struct rpmcpio *cpio, void *buf, size_t n)
+{
+    size_t ret = zreader_read(&cpio->z, &cpio->fda, buf, n);
+    if (ret == -1) {
+	if (errno)
+	    die("%s: %m", cpio->rpmbname);
+	die("%s: decompression failed", cpio->rpmbname);
+    }
+    return ret;
+}
+
 static void rpmcpio_skip(struct rpmcpio *cpio, int n)
 {
     assert(n > 0);
@@ -115,7 +130,7 @@ static void rpmcpio_skip(struct rpmcpio *cpio, int n)
     char buf[BUFSIZ];
     do {
 	int m = (n > BUFSIZ) ? BUFSIZ : n;
-	if (Fread(buf, 1, m, cpio->fd) != m)
+	if (zread(cpio, buf, m) != m)
 	    die("%s: cannot skip cpio bytes", cpio->rpmbname);
 	n -= m;
     }
@@ -178,7 +193,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	cpio->curpos = nextpos;
     }
     char buf[110];
-    if (Fread(buf, 1, 110, cpio->fd) != 110)
+    if (zread(cpio, buf, 110) != 110)
 	die("%s: cannot read cpio header", cpio->rpmbname);
     if (memcmp(buf, "070701", 6) != 0)
 	die("%s: bad cpio header magic", cpio->rpmbname);
@@ -217,7 +232,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     if (cpio->ent.fnamelen < 3U - dot)
 	die("%s: cpio filename too short", cpio->rpmbname);
     char *fnamedest = cpio->fname - dot;
-    if (Fread(fnamedest, 1, fnamesize, cpio->fd) != fnamesize)
+    if (zread(cpio, fnamedest, fnamesize) != fnamesize)
 	die("%s: cannot read cpio filename", cpio->rpmbname);
 
     cpio->curpos += fnamesize;
@@ -313,7 +328,7 @@ size_t rpmcpio_read(struct rpmcpio *cpio, void *buf, size_t n)
 	n = left;
     if (n == 0)
 	return 0;
-    if (Fread(buf, 1, n, cpio->fd) != n)
+    if (zread(cpio, buf, n) != n)
 	die("%s: %s: cannot read cpio file data", cpio->rpmbname, cpio->fname);
     cpio->curpos += n;
     return n;
@@ -329,7 +344,7 @@ size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t n)
     assert(left == cpio->ent.size);
     assert(n > cpio->ent.size);
     n = left;
-    if (Fread(buf, 1, n, cpio->fd) != n)
+    if (zread(cpio, buf, n) != n)
 	die("%s: %s: cannot read cpio symlink", cpio->rpmbname, cpio->fname);
     char *s = buf;
     s[n] = '\0';
@@ -341,6 +356,7 @@ size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t n)
 
 void rpmcpio_close(struct rpmcpio *cpio)
 {
-    Fclose(cpio->fd);
+    zreader_fini(&cpio->z);
+    close(cpio->fda.fd);
     free(cpio);
 }

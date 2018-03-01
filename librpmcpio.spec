@@ -9,8 +9,8 @@ Group: System/Libraries
 URL: https://github.com/svpv/rpmcpio
 Source: %name-%version.tar
 
-# Automatically added by buildreq on Sun Mar 04 2018
-BuildRequires: librpm-devel
+# Automatically added by buildreq on Mon Mar 05 2018
+BuildRequires: liblzma-devel librpm-devel zlib-devel
 
 %package devel
 Summary: Read cpio archive of .rpm packages
