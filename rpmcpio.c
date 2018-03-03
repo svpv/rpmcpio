@@ -185,9 +185,16 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     const char *s = buf + 6;
     unsigned *v = &cpio->ent.ino;
     hex6(s, v, cpio->rpmbname); // 32-bit fields before cpio->ent.size
-    cpio->ent.size = hex1(s + 6 * 8, cpio->rpmbname); // the 7th, 64-bit
-    hex6(s + 7 * 8, v + 8, cpio->rpmbname); // after cpio->ent.size
+    hex6(s + 6 * 8, v + 7, cpio->rpmbname); // includes half of ent.size
 
+    // Grand type punning: assigns 64-bit ent.size from its 32-bit half.
+    cpio->ent.size = v[7];
+
+    // The checksum field is not part of cpioent, rpm always sets it to zero.
+    if (memcmp(s + 12 * 8, "0000" "0000", 8))
+	die("%s: non-zero cpio checksum", cpio->rpmbname);
+
+    cpio->ent.fflags = 0; // not yet supported
     cpio->ent.packaged = true;
     memset(cpio->ent.pad, 0, sizeof cpio->ent.pad);
 

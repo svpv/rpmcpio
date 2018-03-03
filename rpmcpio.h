@@ -50,7 +50,7 @@ struct cpioent {
     unsigned dev_major, dev_minor;
     unsigned rdev_major, rdev_minor;
     unsigned fnamelen; // strlen(fname) < PATH_MAX
-    unsigned checksum;
+    unsigned fflags; // RPMFILE_CONFIG | RPMFILE_DOC | RPMFILE_GHOST ...
     unsigned no; // this entry's number, no >= 0 && no < nent
     // If the entry comes from cpio, packaged is set to true.
     // Otherwise the entry is restored from the header,
