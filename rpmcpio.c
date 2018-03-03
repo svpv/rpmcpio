@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <assert.h>
+#include <fcntl.h>
 #include <rpm/rpmlib.h>
 #include <rpm/rpmts.h>
 #include "rpmcpio.h"
@@ -51,8 +52,12 @@ struct rpmcpio {
 
 static_assert(sizeof(struct cpioent) == 64, "nice cpioent size");
 
-struct rpmcpio *rpmcpio_open(const char *rpmfname, unsigned *nent)
+struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
+			     unsigned *nent, bool all)
 {
+    // dirfd is not yet supported
+    assert(*rpmfname == '/' || dirfd == AT_FDCWD);
+
     const char *rpmbname = xbasename(rpmfname);
     FD_t fd = Fopen(rpmfname, "r.ufdio");
     if (Ferror(fd))
@@ -77,11 +82,6 @@ struct rpmcpio *rpmcpio_open(const char *rpmfname, unsigned *nent)
 	die("%s: bad file count", rpmbname);
     if (nent)
 	*nent = ne;
-    if (ne == 0) {
-	headerFree(h);
-	Fclose(fd);
-	return NULL;
-    }
 
     size_t len = strlen(rpmbname);
     struct rpmcpio *cpio = xmalloc(sizeof(*cpio) + len + 1);
@@ -182,6 +182,9 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     hex6(s, v, cpio->rpmbname); // 32-bit fields before cpio->ent.size
     cpio->ent.size = hex1(s + 6 * 8, cpio->rpmbname); // the 7th, 64-bit
     hex6(s + 7 * 8, v + 8, cpio->rpmbname); // after cpio->ent.size
+
+    cpio->ent.packaged = true;
+    memset(cpio->ent.pad, 0, sizeof cpio->ent.pad);
 
     // cpio magic is 6 bytes, but filename is padded to a multiple of four bytes
     unsigned fnamesize = ((cpio->ent.fnamelen + 1) & ~3) + 2;

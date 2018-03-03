@@ -18,8 +18,26 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-struct rpmcpio *rpmcpio_open(const char *rpmfname, unsigned *nent);
-void rpmcpio_close(struct rpmcpio *cpio);
+#pragma once
+#include <stdbool.h>
+
+// Open the package payload to process its file data.
+// The API is deliberately simplified for automated testing and the like:
+// it will simply die on the first error rather than return any error code.
+// If rpmfname is a relative path, dirfd must be set to its directory fd,
+// or to AT_FDCWD.  The total file count, obtained from the package header,
+// is returned via nent; the actual number of cpio entries can be fewer,
+// because of %ghost files; the handle is created even if nent=0.
+// If all=true is requested, unpackaged files, its entries restored from
+// the package header, will be traversed after the regular cpio entries.
+struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
+			     unsigned *nent, bool all) __attribute__((nonnull(2)));
+
+// The handle can be reused for another package.  Dies on error.
+void rpmcpio_reopen(struct rpmcpio *cpio, int dirfd, const char *rpmfname,
+		    unsigned *nent, bool all) __attribute__((nonnull(1,3)));
+
+void rpmcpio_close(struct rpmcpio *cpio) __attribute__((nonnull(1)));
 
 struct cpioent {
     unsigned ino;
@@ -34,7 +52,11 @@ struct cpioent {
     unsigned fnamelen; // strlen(fname) < PATH_MAX
     unsigned checksum;
     unsigned no; // this entry's number, no >= 0 && no < nent
-    char pad[4];
+    // If the entry comes from cpio, packaged is set to true.
+    // Otherwise the entry is restored from the header,
+    // most probably because it's a %ghost file.
+    bool packaged;
+    char pad[3];
     char fname[]; // PATH_MAX = 4096, including trailing '\0'
 };
 
