@@ -21,7 +21,9 @@
 #include <stdbool.h>
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <rpm/rpmlib.h>
 #include <rpm/rpmts.h>
 #include "rpmcpio.h"
@@ -231,21 +233,45 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 
     cpio->ent.fnamelen -= 1 + dot;
 
+    // Symlink targets must fit in a PATH_MAX buffer.
+    if (S_ISLNK(cpio->ent.mode) && ((cpio->ent.size < 1 || cpio->ent.size > PATH_MAX - 1)))
+	die("%s: %s: bad symlink size: %llu", cpio->rpmbname, cpio->fname, cpio->ent.size);
+
     return &cpio->ent;
 }
 
-int rpmcpio_read(struct rpmcpio *cpio, void *buf, int n)
+size_t rpmcpio_read(struct rpmcpio *cpio, void *buf, size_t n)
 {
-    assert(n >= 0);
-    assert(cpio->ent.no >= 0);
-    int left = cpio->n2 - cpio->n1;
-    assert(left >= 0);
+    assert(cpio->ent.no != -1);
+    assert(cpio->ent.packaged);
+    assert(S_ISREG(cpio->ent.mode));
+    assert(n > 0);
+    size_t left = cpio->n2 - cpio->n1;
     if (n > left)
 	n = left;
     if (n == 0)
 	return 0;
     if (Fread(buf, 1, n, cpio->fd) != n)
-	die("%s: %s: cannot read cpio data", cpio->rpmbname, cpio->fname);
+	die("%s: %s: cannot read cpio file data", cpio->rpmbname, cpio->fname);
+    cpio->n1 += n;
+    return n;
+}
+
+size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t n)
+{
+    assert(cpio->ent.no != -1);
+    assert(cpio->ent.packaged);
+    assert(S_ISLNK(cpio->ent.mode));
+    size_t left = cpio->n2 - cpio->n1;
+    assert(left == cpio->ent.size);
+    assert(n > cpio->ent.size);
+    n = left;
+    if (Fread(buf, 1, n, cpio->fd) != n)
+	die("%s: %s: cannot read cpio symlink", cpio->rpmbname, cpio->fname);
+    char *s = buf;
+    s[n] = '\0';
+    if (strlen(s) < n)
+	die("%s: %s: embedded null byte in cpio symlink", cpio->rpmbname, cpio->fname);
     cpio->n1 += n;
     return n;
 }

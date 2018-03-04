@@ -62,4 +62,12 @@ struct cpioent {
 
 const struct cpioent *rpmcpio_next(struct rpmcpio *cpio);
 
-int rpmcpio_read(struct rpmcpio *cpio, void *buf, int n);
+// Read file data.  The entry must be S_ISREG(ent->mode).  Dies on error.
+size_t rpmcpio_read(struct rpmcpio *cpio, void *buf, size_t size);
+
+// The rules for reading the target of a symbolic link.  The entry must be
+// S_ISLNK(ent->mode).  The string length of the target, without the trailing
+// '\0', is ent->size.  The caller must provide a buffer of at least size + 1
+// bytes, or PATH_MAX.  The string will be null-terminated, and its length
+// returned.  There will be no embedded null bytes in the string.
+size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t size);
