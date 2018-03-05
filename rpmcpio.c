@@ -233,6 +233,10 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 
     cpio->ent.fnamelen -= 1 + dot;
 
+    // A valid ent->mode must fit into 16 bits.
+    if (cpio->ent.mode > 0xffff)
+	die("%s: %s: bad mode: 0%o", cpio->rpmbname, cpio->fname, cpio->ent.mode);
+
     // Symlink targets must fit in a PATH_MAX buffer.
     if (S_ISLNK(cpio->ent.mode) && ((cpio->ent.size < 1 || cpio->ent.size > PATH_MAX - 1)))
 	die("%s: %s: bad symlink size: %llu", cpio->rpmbname, cpio->fname, cpio->ent.size);
