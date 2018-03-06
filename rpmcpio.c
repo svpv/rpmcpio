@@ -44,6 +44,7 @@ struct rpmcpio {
     unsigned long long curpos; // current data pos
     unsigned long long endpos; // end data pos
     unsigned nent;
+    struct { unsigned ino, mode, nlink, cnt; } hard;
     union { bool rpm; } src;
     struct cpioent ent;
     char fname[4096];
@@ -100,6 +101,7 @@ struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
     cpio->curpos = cpio->endpos = 0;
     cpio->nent = ne;
     cpio->ent.no = -1;
+    cpio->hard.nlink = cpio->hard.cnt = 0;
     cpio->src.rpm = !headerGetString(h, RPMTAG_SOURCERPM);
 
     headerFree(h);
@@ -182,6 +184,8 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	die("%s: bad cpio header magic", cpio->rpmbname);
     cpio->curpos += 110;
 
+    struct cpioent *ent = &cpio->ent;
+
     // Parse hex fields.
     const char *s = buf + 6;
     unsigned *v = &cpio->ent.ino;
@@ -219,8 +223,12 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     cpio->curpos += fnamesize;
     cpio->endpos = cpio->curpos + cpio->ent.size;
 
-    if (memcmp(fnamedest, "TRAILER!!!", cpio->ent.fnamelen) == 0)
+    if (memcmp(fnamedest, "TRAILER!!!", ent->fnamelen) == 0) {
+	// The trailer shouldn't happen in the middle of a hardlink set.
+	if (cpio->hard.cnt < cpio->hard.nlink)
+	    die("%s: %s: meager hardlink set", cpio->rpmbname, "TRAILER");
 	return NULL;
+    }
 
     if (++cpio->ent.no >= cpio->nent)
 	die("%s: %s: unexpected extra cpio entry", cpio->rpmbname, fnamedest);
@@ -235,9 +243,61 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     if (cpio->ent.mode > 0xffff)
 	die("%s: %s: bad mode: 0%o", cpio->rpmbname, cpio->fname, cpio->ent.mode);
 
-    // Symlink targets must fit in a PATH_MAX buffer.
-    if (S_ISLNK(cpio->ent.mode) && ((cpio->ent.size < 1 || cpio->ent.size > PATH_MAX - 1)))
-	die("%s: %s: bad symlink size: %llu", cpio->rpmbname, cpio->fname, cpio->ent.size);
+    // Finalizing an existing hardlink set.
+    if (cpio->hard.cnt && cpio->hard.cnt == cpio->hard.nlink) {
+	// This new file is already not part of the preceding set.  Or is it?
+	if (ent->ino == cpio->hard.ino)
+	    die("%s: %s: obese hardlink set", cpio->rpmbname, cpio->fname);
+	cpio->hard.nlink = cpio->hard.cnt = 0;
+    }
+
+    // So is it a hardlink?
+    if (!S_ISDIR(ent->mode) && ent->nlink > 1) {
+	// Starting a new hardlink set?
+	if (cpio->hard.cnt == 0) {
+	    // E.g. ext4 has 16-bit i_links_count.
+	    if (ent->nlink > 0xffff)
+		die("%s: %s: bad nlink", cpio->rpmbname, cpio->fname);
+	    cpio->hard.ino = ent->ino, cpio->hard.mode = ent->mode;
+	    cpio->hard.nlink = ent->nlink, cpio->hard.cnt = 1;
+	}
+	// Advancing in the existing hardlink set.
+	else {
+	    if (ent->ino != cpio->hard.ino)
+		die("%s: %s: meager hardlink set", cpio->rpmbname, cpio->fname);
+	    if (ent->mode != cpio->hard.mode)
+		die("%s: %s: fickle hardlink mode", cpio->rpmbname, cpio->fname);
+	    if (ent->nlink != cpio->hard.nlink)
+		die("%s: %s: fickle nlink", cpio->rpmbname, cpio->fname);
+	    cpio->hard.cnt++;
+	}
+	// Non-last hardlink?
+	if (cpio->hard.cnt < cpio->hard.nlink) {
+	    // Symbolic links can be hardlinked, too.  With rpm-4.0, their size
+	    // was misleading.  Starting with rpm-4.12.0-alpha~173, only
+	    // regular files can have hardlinks.
+	    if (S_ISLNK(ent->mode)) {
+		if (0)
+		    warn("%s: %s: hardlinked symlink", cpio->rpmbname, cpio->fname);
+		cpio->endpos = cpio->curpos;
+		ent->size = 0;
+	    }
+	    // All but the last hardlink in a set must come with no data.
+	    else if (ent->size)
+		die("%s: %s: non-empty hardlink data", cpio->rpmbname, cpio->fname);
+	}
+    }
+    // Not a hardlink in the middle of the set?
+    else if (cpio->hard.cnt)
+	die("%s: %s: meager hardlink set", cpio->rpmbname, cpio->fname);
+
+    // Validate the size of symlink target.
+    if (S_ISLNK(ent->mode)) {
+	if (ent->size == 0 && cpio->hard.cnt == cpio->hard.nlink)
+	    die("%s: %s: zero-length symlink target", cpio->rpmbname, cpio->fname);
+	if (ent->size >= PATH_MAX)
+	    die("%s: %s: symlink target too long", cpio->rpmbname, cpio->fname);
+    }
 
     return &cpio->ent;
 }
@@ -264,6 +324,7 @@ size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t n)
     assert(cpio->ent.no != -1);
     assert(cpio->ent.packaged);
     assert(S_ISLNK(cpio->ent.mode));
+    assert(cpio->ent.size > 0); // hardlinked symlink? something of a curiosity
     unsigned long long left = cpio->endpos - cpio->curpos;
     assert(left == cpio->ent.size);
     assert(n > cpio->ent.size);
