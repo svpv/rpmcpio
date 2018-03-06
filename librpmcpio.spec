@@ -1,5 +1,5 @@
 Name: librpmcpio
-Version: 0.2
+Version: 0.3
 Release: alt1
 
 Summary: Read cpio archive of .rpm packages
@@ -45,6 +45,10 @@ install -pD -m644 rpmcpio.h %buildroot%_includedir/rpmcpio.h
 %_libdir/librpmcpio.so
 
 %changelog
+* Tue Mar 06 2018 Alexey Tourbin <at@altlinux.ru> 0.3-alt1
+- fixed support for 2G+ payloads
+- implemented verification of hardlink sets
+
 * Sun Mar 04 2018 Alexey Tourbin <at@altlinux.ru> 0.2-alt1
 - first beta release
 - ported to the new rpm API
