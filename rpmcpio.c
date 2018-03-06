@@ -41,10 +41,8 @@ static unsigned getFileCount(Header h)
 
 struct rpmcpio {
     FD_t fd;
-    // n1: current data pos
-    // n2: end data pos
-    // n3: next entry pos
-    int n1, n2, n3;
+    unsigned long long curpos; // current data pos
+    unsigned long long endpos; // end data pos
     unsigned nent;
     union { bool rpm; } src;
     struct cpioent ent;
@@ -99,7 +97,7 @@ struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
     if (cpio->fd != fd)
 	Fclose(fd);
 
-    cpio->n1 = cpio->n2 = cpio->n3 = 0;
+    cpio->curpos = cpio->endpos = 0;
     cpio->nent = ne;
     cpio->ent.no = -1;
     cpio->src.rpm = !headerGetString(h, RPMTAG_SOURCERPM);
@@ -172,16 +170,17 @@ static void hex6(const char s[6*8], unsigned v[6], const char *rpmbname)
 
 const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 {
-    if (cpio->n3 > cpio->n1) {
-	rpmcpio_skip(cpio, cpio->n3 - cpio->n1);
-	cpio->n1 = cpio->n3;
+    unsigned long long nextpos = (cpio->endpos + 3) & ~3;
+    if (nextpos > cpio->curpos) {
+	rpmcpio_skip(cpio, nextpos - cpio->curpos);
+	cpio->curpos = nextpos;
     }
     char buf[110];
     if (Fread(buf, 1, 110, cpio->fd) != 110)
 	die("%s: cannot read cpio header", cpio->rpmbname);
     if (memcmp(buf, "070701", 6) != 0)
 	die("%s: bad cpio header magic", cpio->rpmbname);
-    cpio->n1 += 110;
+    cpio->curpos += 110;
 
     // Parse hex fields.
     const char *s = buf + 6;
@@ -217,9 +216,8 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     if (Fread(fnamedest, 1, fnamesize, cpio->fd) != fnamesize)
 	die("%s: cannot read cpio filename", cpio->rpmbname);
 
-    cpio->n1 += fnamesize;
-    cpio->n2 = cpio->n1 + cpio->ent.size;
-    cpio->n3 = (cpio->n2 + 3) & ~3;
+    cpio->curpos += fnamesize;
+    cpio->endpos = cpio->curpos + cpio->ent.size;
 
     if (memcmp(fnamedest, "TRAILER!!!", cpio->ent.fnamelen) == 0)
 	return NULL;
@@ -250,14 +248,14 @@ size_t rpmcpio_read(struct rpmcpio *cpio, void *buf, size_t n)
     assert(cpio->ent.packaged);
     assert(S_ISREG(cpio->ent.mode));
     assert(n > 0);
-    size_t left = cpio->n2 - cpio->n1;
+    unsigned long long left = cpio->endpos - cpio->curpos;
     if (n > left)
 	n = left;
     if (n == 0)
 	return 0;
     if (Fread(buf, 1, n, cpio->fd) != n)
 	die("%s: %s: cannot read cpio file data", cpio->rpmbname, cpio->fname);
-    cpio->n1 += n;
+    cpio->curpos += n;
     return n;
 }
 
@@ -266,7 +264,7 @@ size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t n)
     assert(cpio->ent.no != -1);
     assert(cpio->ent.packaged);
     assert(S_ISLNK(cpio->ent.mode));
-    size_t left = cpio->n2 - cpio->n1;
+    unsigned long long left = cpio->endpos - cpio->curpos;
     assert(left == cpio->ent.size);
     assert(n > cpio->ent.size);
     n = left;
@@ -276,7 +274,7 @@ size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t n)
     s[n] = '\0';
     if (strlen(s) < n)
 	die("%s: %s: embedded null byte in cpio symlink", cpio->rpmbname, cpio->fname);
-    cpio->n1 += n;
+    cpio->curpos += n;
     return n;
 }
 
