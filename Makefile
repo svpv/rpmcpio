@@ -11,7 +11,7 @@ SRC = rpmcpio.c
 HDR = rpmcpio.h errexit.h
 
 RPM_OPT_FLAGS ?= -O2 -g -Wall
-SHARED = -fpic -shared -Wl,--no-undefined
+SHARED = -fpic -shared -Wl,-soname=$(SONAME) -Wl,--no-undefined
 LTO = -flto
 LIBS = -lrpm -lrpmio
 DEFS =
