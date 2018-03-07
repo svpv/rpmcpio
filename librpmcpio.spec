@@ -31,6 +31,9 @@ of .rpm packages.  Packaged files can be iterated and looked into.
 %build
 make
 
+%check
+make check
+
 %install
 mkdir -p %buildroot%_libdir
 cp -av librpmcpio.so* %buildroot%_libdir
