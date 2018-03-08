@@ -81,10 +81,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     if (hdr.il > (64<<10) || hdr.dl > (256<<20))
 	return ERR("bad sig header size");
 
-    // defaults
-    h->fileCount = 0;
-    memcpy(h->zprog, "lzma", sizeof "lzma");
-
 #define RPM_INT16_TYPE        3
 #define RPM_INT32_TYPE        4
 #define RPM_INT64_TYPE        5
@@ -102,21 +98,81 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #define RPMTAG_PAYLOADCOMPRESSOR 1125
 #define RPMTAG_LONGFILESIZES     5008
 
+    // The tags that we need will be placed in a tightly-packed table.
+    // If a tag exists and its table entry is filled, cnt must be non-zero.
+    struct tabent { unsigned tag, type, cnt, off, nextoff; };
+    struct {
+	struct tabent oldfilenames;
+	struct tabent filesizes;
+	struct tabent filemodes;
+	struct tabent fileflags;
+	struct tabent sourcerpm;
+	struct tabent dirindexes;
+	struct tabent basenames;
+	struct tabent dirnames;
+	struct tabent payloadcompressor;
+	struct tabent longfilesizes;
+	// Non-existent tag with maximum value, to facilitate the merge-like algorithm.
+	struct tabent nil;
+    } tab = {
+	.oldfilenames      = { RPMTAG_OLDFILENAMES, RPM_STRING_ARRAY_TYPE },
+	.filesizes         = { RPMTAG_FILESIZES, RPM_INT32_TYPE },
+	.filemodes         = { RPMTAG_FILEMODES, RPM_INT16_TYPE },
+	.fileflags         = { RPMTAG_FILEFLAGS, RPM_INT32_TYPE },
+	.sourcerpm         = { RPMTAG_SOURCERPM, RPM_STRING_TYPE },
+	.dirindexes        = { RPMTAG_DIRINDEXES, RPM_INT32_TYPE },
+	.basenames         = { RPMTAG_BASENAMES, RPM_STRING_ARRAY_TYPE },
+	.dirnames          = { RPMTAG_DIRNAMES, RPM_STRING_ARRAY_TYPE },
+	.payloadcompressor = { RPMTAG_PAYLOADCOMPRESSOR, RPM_STRING_TYPE },
+	.longfilesizes     = { RPMTAG_LONGFILESIZES, RPM_INT64_TYPE },
+	.nil               = { -1, -1 }
+    };
+
+    // Run the merge which fills the table.
+    struct tabent *te = &tab.oldfilenames;
+    struct tabent *nextoffte = NULL;
+    unsigned lasttag = 0, lastoff = 0;
     for (unsigned i = 0; i < hdr.il; i++) {
 	struct { unsigned tag, type, off, cnt; } e;
 	if (reada(fda, &e, sizeof e) != sizeof e)
 	    return ERR("cannot read pkg header");
-	if (e.tag == htonl(RPMTAG_FILEMODES)) {
-	    h->fileCount = -1;
-	    if (e.type == htonl(RPM_INT16_TYPE) && e.cnt)
-		h->fileCount = ntohl(e.cnt);
-	    if (h->fileCount == -1)
-		return ERR("bad file count");
+	unsigned tag = ntohl(e.tag);
+	unsigned off = ntohl(e.off);
+	if (tag <= lasttag)
+	    return ERR("tags out of order");
+	lasttag = tag;
+	if (nextoffte) {
+	    nextoffte->nextoff = off;
+	    nextoffte = NULL;
 	}
+	while (te->tag < tag)
+	    te++;
+	if (te->tag > tag)
+	    continue;
+	if (lastoff >= off)
+	    return ERR("offsets out of order");
+	lastoff = off;
+	if (e.cnt == 0)
+	    return ERR("zero tag count");
+	unsigned type = ntohl(e.type);
+	if (type != te->type)
+	    return ERR("bad tag type");
+	te->cnt = ntohl(e.cnt);
+	te->off = off;
+	nextoffte = te; // set te->nextoff on the next iteration
+    }
+    if (nextoffte && nextoffte != &tab.nil) {
+	if (nextoffte->off >= hdr.dl)
+	    return ERR("offsets out of order");
+	nextoffte->off = hdr.dl;
+	nextoffte = NULL;
     }
 
     if (skipa(fda, hdr.dl) != hdr.dl)
 	return ERR("cannot read pkg header");
+
+    h->fileCount = tab.filemodes.cnt;
+    memcpy(h->zprog, "lzma", sizeof "lzma");
 
     return true;
 }
