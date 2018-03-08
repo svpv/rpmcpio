@@ -25,31 +25,19 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <rpm/rpmlib.h>
-#include <rpm/rpmts.h>
 #include "rpmcpio.h"
 #include "reada.h"
+#include "header.h"
 #include "zreader.h"
 #include "errexit.h"
-
-static unsigned getFileCount(Header h)
-{
-    // Getting DIRINDEXES is cheaper than BASENAMES, no parsing.
-    struct rpmtd_s td;
-    int rc = headerGet(h, RPMTAG_DIRINDEXES, &td, HEADERGET_MINMEM);
-    if (rc == 1)
-	return td.count ? td.count : -1; // zero count not permitted
-    return 0;
-}
 
 struct rpmcpio {
     unsigned long long curpos; // current data pos
     unsigned long long endpos; // end data pos
-    unsigned nent;
     struct { unsigned ino, mode, nlink, cnt; } hard;
-    union { bool rpm; } src;
     struct fda fda;
     char fdabuf[NREADA];
+    struct header h;
     struct zreader z;
     struct cpioent ent;
     char fname[4096];
@@ -61,54 +49,30 @@ static_assert(sizeof(struct cpioent) == 64, "nice cpioent size");
 struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
 			     unsigned *nent, bool all)
 {
-    // dirfd is not yet supported
-    assert(*rpmfname == '/' || dirfd == AT_FDCWD);
-
     const char *rpmbname = xbasename(rpmfname);
-    FD_t fd = Fopen(rpmfname, "r.ufdio");
-    if (Ferror(fd))
-	die("%s: cannot open", rpmbname);
-
-    static rpmts ts;
-    if (ts == NULL) {
-	// TODO: atomic exchange or else free
-	ts = rpmtsCreate();
-	assert(ts);
-	rpmtsSetVSFlags(ts, (rpmVSFlags) -1);
-    }
-
-    Header h = NULL;
-    int rc = rpmReadPackageFile(ts, fd, rpmfname, &h);
-    if (rc != RPMRC_OK && rc != RPMRC_NOTTRUSTED && rc != RPMRC_NOKEY)
-	die("%s: cannot read rpm header", rpmbname);
-    assert(h);
-
-    unsigned ne = getFileCount(h);
-    if (ne == -1)
-	die("%s: bad file count", rpmbname);
-    if (nent)
-	*nent = ne;
+    int fd = openat(dirfd, rpmfname, O_RDONLY);
+    if (fd < 0)
+	die("%s: %m", rpmbname);
 
     size_t len = strlen(rpmbname);
     struct rpmcpio *cpio = xmalloc(sizeof(*cpio) + len + 1);
     memcpy(cpio->rpmbname, rpmbname, len + 1);
 
-    const char *zprog = headerGetString(h, RPMTAG_PAYLOADCOMPRESSOR);
-    if (!(zprog && *zprog))
-	zprog = "gzip";
-    if (!zreader_init(&cpio->z, zprog))
-	die("%s: cannot initialize %s decompressor", rpmbname, zprog);
+    cpio->fda = (struct fda) { fd, cpio->fdabuf };
 
-    cpio->fda = (struct fda) { dup(Fileno(fd)), cpio->fdabuf };
-    Fclose(fd);
+    const char *err;
+    if (!header_read(&cpio->h, &cpio->fda, &err))
+	die("%s: %s", rpmbname, err);
+    if (nent)
+	*nent = cpio->h.fileCount;
+
+    if (!zreader_init(&cpio->z, cpio->h.zprog))
+	die("%s: cannot initialize %s decompressor", rpmbname, cpio->h.zprog);
 
     cpio->curpos = cpio->endpos = 0;
-    cpio->nent = ne;
     cpio->ent.no = -1;
     cpio->hard.nlink = cpio->hard.cnt = 0;
-    cpio->src.rpm = !headerGetString(h, RPMTAG_SOURCERPM);
 
-    headerFree(h);
     return cpio;
 }
 
@@ -118,7 +82,7 @@ static inline size_t zread(struct rpmcpio *cpio, void *buf, size_t n)
     if (ret == -1) {
 	if (errno)
 	    die("%s: %m", cpio->rpmbname);
-	die("%s: decompression failed", cpio->rpmbname);
+	die("%s: %s decompression failed", cpio->rpmbname, cpio->h.zprog);
     }
     return ret;
 }
@@ -223,7 +187,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
     // At this stage, fnamelen includes '\0', and fname should start with "./".
     // The leading dot will be stripped implicitly by copying to &fname[-1].
     // src.rpm is the exeption: there should be no prefix, and nothing will be stripped.
-    bool dot = !cpio->src.rpm;
+    bool dot = !cpio->h.src.rpm;
     if (cpio->ent.fnamelen - dot > sizeof cpio->fname)
 	die("%s: cpio filename too long", cpio->rpmbname);
     assert(fnamesize - dot <= sizeof cpio->fname);
@@ -245,7 +209,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	return NULL;
     }
 
-    if (++cpio->ent.no >= cpio->nent)
+    if (++cpio->ent.no >= cpio->h.fileCount)
 	die("%s: %s: unexpected extra cpio entry", cpio->rpmbname, fnamedest);
 
     bool has_prefix = memcmp(fnamedest, "./", 2) == 0;

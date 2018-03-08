@@ -7,13 +7,13 @@ lib$(NAME).so: $(SONAME)
 clean:
 	rm -f lib$(NAME).so $(SONAME) example zreader
 
-SRC = rpmcpio.c zreader.c reada.c
-HDR = rpmcpio.h zreader.h reada.h errexit.h
+SRC = rpmcpio.c header.c zreader.c reada.c
+HDR = rpmcpio.h header.h zreader.h reada.h errexit.h
 
 RPM_OPT_FLAGS ?= -O2 -g -Wall
 SHARED = -fpic -shared -Wl,-soname=$(SONAME) -Wl,--no-undefined
 LTO = -flto
-LIBS = -lrpm -lrpmio -lz -llzma
+LIBS = -lz -llzma
 DEFS =
 
 $(SONAME): $(SRC) $(HDR)
