@@ -23,9 +23,24 @@
 struct header {
     unsigned fileCount;
     union { bool rpm; } src;
-    char zprog[11];
+    union { bool fnames; } old;
+    char zprog[10];
+    struct fi {
+	unsigned bn;
+	unsigned dn;
+	unsigned short blen;
+	unsigned short dlen;
+	// rpmbuild uses fflags' high bits for RPMFILE_EXCLUDE etc.
+	unsigned fflags : 24;
+	unsigned seen : 8;
+	unsigned long long size : 48;
+	unsigned long long mode : 16;
+    } *ff;
+    // Strings point here, e.g. strlen(strtab + dn) == dlen.
+    char *strtab;
 };
 
 bool header_read(struct header *h, struct fda *fda, const char **err);
+void header_freedata(struct header *h);
 
 #pragma GCC visibility pop

@@ -321,6 +321,7 @@ size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t n)
 void rpmcpio_close(struct rpmcpio *cpio)
 {
     zreader_fini(&cpio->z);
+    header_freedata(&cpio->h);
     close(cpio->fda.fd);
     free(cpio);
 }

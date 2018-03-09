@@ -19,7 +19,10 @@
 // SOFTWARE.
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <arpa/inet.h>
+#include <endian.h>
 #include "reada.h"
 #include "header.h"
 
@@ -168,11 +171,273 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	nextoffte = NULL;
     }
 
-    if (skipa(fda, hdr.dl) != hdr.dl)
-	return ERR("cannot read pkg header");
+    if (h->src.rpm ^ !tab.sourcerpm.cnt)
+	return ERR("lead.type and header.sourcerpm do not match");
 
-    h->fileCount = tab.filemodes.cnt;
-    memcpy(h->zprog, "lzma", sizeof "lzma");
+    if (tab.filemodes.cnt != tab.fileflags.cnt)
+	return ERR("file count mismatch");
+
+    // Either FILESIZES or LONGFILESIZES
+    if (tab.filesizes.cnt == tab.filemodes.cnt) {
+	if (tab.longfilesizes.cnt)
+	    return ERR("bad filesizes");
+    }
+    else {
+	if (tab.longfilesizes.cnt != tab.filemodes.cnt)
+	    return ERR("bad filesizes");
+	if (tab.filesizes.cnt)
+	    return ERR("bad filesizes");
+    }
+
+    // Either OLDFILENAMES or BASENAMES+DIRNAMES+DIRINDEXES.
+    if (tab.filemodes.cnt == tab.oldfilenames.cnt) {
+	if (tab.basenames.cnt || tab.dirnames.cnt || tab.dirindexes.cnt)
+	    return ERR("bad filenames");
+    }
+    else {
+	if (tab.filemodes.cnt != tab.basenames.cnt ||
+	    tab.basenames.cnt != tab.dirindexes.cnt)
+	    return ERR("bad filenames");
+	if (tab.oldfilenames.cnt)
+	    return ERR("bad filenames");
+	// Suppose the dirnames count is too big, so what?  Couldn't it be
+	// that some dirnames are unused?  Well, this can induce integer
+	// overlow with malloc.  (And the package is probably corrupt.)
+	if (tab.dirnames.cnt > tab.basenames.cnt)
+	    return ERR("bad dirnames");
+	// Whether dirnames count is too small is determined at the time
+	// of unpacking dirindexes.
+    }
+    h->old.fnames = tab.oldfilenames.cnt;
+
+    // Current offset within the header's data store.
+    unsigned doff = 0;
+
+    // File info, to be malloc'd.
+    struct fi *ff = NULL;
+
+    // File count is zero?  Fast forward to PayloadCompressor.
+    unsigned fileCount = h->fileCount = tab.filemodes.cnt;
+    if (!fileCount)
+	goto compressor;
+
+    // Assume each file takes at least 16 bytes in the data store.
+    // This is mostly to avoid integer overflow with malloc.
+    if (h->fileCount > (16<<20))
+	return ERR("bad file count");
+    // Allocate in a single chunk.
+    size_t alloc = fileCount * sizeof(*ff);
+    if (tab.oldfilenames.cnt)
+	alloc += tab.oldfilenames.nextoff - tab.oldfilenames.off;
+    else {
+	alloc += tab.basenames.nextoff - tab.basenames.off;
+	// Directories only loaded for binary rpms.
+	if (!h->src.rpm) {
+	    alloc += tab.dirnames.nextoff - tab.dirnames.off;
+	    // Will remap Dirindexes to direct offsets into strtab.
+	    alloc += tab.dirnames.cnt * 6 + 3;
+	}
+    }
+    ff = h->ff = malloc(alloc);
+    if (!ff)
+	return ERR("malloc failed");
+    h->strtab = (void *) (ff + fileCount);
+
+    // Fill the strtab with basenames and dirnames.
+    char *strpos = h->strtab;
+    // The end of a segment loaded into the strtab.
+    char *strend;
+
+#undef ERR
+#define ERR(s) (free(ff), *err = s, false)
+
+#define SkipTo(off)					\
+    do {						\
+	assert(off >= doff);				\
+	unsigned skip = off - doff;			\
+	if (skip && skipa(fda, skip) != skip)		\
+	    return ERR("cannot read header data");	\
+	doff += skip;					\
+    } while (0)
+
+#define Taking(te, cnt, w, s)				\
+    do {						\
+	if (te->nextoff - te->off < cnt * sizeof w)	\
+	    return ERR("bad " s);			\
+	doff += cnt * sizeof w;				\
+    } while (0)
+
+#define Read1(w)					\
+    do {						\
+	if (reada(fda, &w, sizeof w) != sizeof w)	\
+	    return ERR("cannot read header data");	\
+    } while (0)
+
+    // Take a string or a string array into the strtab.
+#define TakeS(te)					\
+    do {						\
+	unsigned size = te->nextoff - te->off;		\
+	if (reada(fda, strpos, size) != size)		\
+	    return ERR("cannot read header data");	\
+	doff += size;					\
+	strend = strpos + size;				\
+	if (strend[-1] != '\0')				\
+	    return ERR("malformed string tag");		\
+    } while (0)
+
+    te = &tab.oldfilenames;
+    if (te->cnt) {
+	SkipTo(te->off);
+	TakeS(te);
+	for (unsigned i = 0; i < fileCount; i++) {
+	    if (strpos == strend)
+		return ERR("bad filenames");
+	    size_t len = strlen(strpos);
+	    if (len > 0xffff)
+		return ERR("bad filenames");
+	    ff[i].bn = strpos - h->strtab;
+	    ff[i].blen = len;
+	    strpos += len + 1;
+	    // dn and dlen not set for h->old.fnames
+	}
+    }
+
+    te = &tab.filesizes;
+    if (te->cnt) {
+	SkipTo(te->off);
+	unsigned fsize;
+	Taking(te, fileCount, fsize, "filesizes");
+	for (unsigned i = 0; i < fileCount; i++) {
+	    Read1(fsize);
+	    ff[i].size = ntohl(fsize);
+	}
+    }
+
+    te = &tab.filemodes;
+    SkipTo(te->off);
+    unsigned short fmode;
+    Taking(te, fileCount, fmode, "filemodes");
+    for (unsigned i = 0; i < fileCount; i++) {
+	Read1(fmode);
+	ff[i].mode = ntohs(fmode);
+    }
+
+    te = &tab.fileflags;
+    SkipTo(te->off);
+    unsigned fflags;
+    Taking(te, fileCount, fflags, "fileflags");
+    for (unsigned i = 0; i < fileCount; i++) {
+	Read1(fflags);
+	fflags = ntohl(fflags);
+	if (fflags > 0xFFffff)
+	    return ERR("bad fileflags");
+	ff[i].fflags = fflags;
+	ff[i].seen = 0;
+    }
+
+    te = &tab.dirindexes;
+    if (te->cnt && !h->src.rpm) {
+	SkipTo(te->off);
+	unsigned dindex;
+	Taking(te, fileCount, dindex, "dirindexes");
+	for (unsigned i = 0; i < fileCount; i++) {
+	    Read1(dindex);
+	    dindex = ntohl(dindex);
+	    if (dindex >= tab.dirnames.cnt)
+		return ERR("bad dirindexes");
+	    // Place raw di into dn, will update in just a moment.
+	    ff[i].dn = dindex;
+	}
+    }
+
+    te = &tab.basenames;
+    if (te->cnt) {
+	SkipTo(te->off);
+	TakeS(te);
+	for (unsigned i = 0; i < fileCount; i++) {
+	    if (strpos == strend)
+		return ERR("bad basenames");
+	    size_t len = strlen(strpos);
+	    if (len > 0xffff)
+		return ERR("bad basenames");
+	    ff[i].bn = strpos - h->strtab;
+	    ff[i].blen = len;
+	    strpos += len + 1;
+	}
+    }
+
+    te = &tab.dirnames;
+    if (te->cnt && !h->src.rpm) {
+	SkipTo(te->off);
+	TakeS(te);
+	// Unpack dirnames' offsets and lengths into temporary arrays.
+	unsigned *dn = (void *) (((uintptr_t) strend + 3) & ~3);
+	unsigned short *dl = (void *) (dn + tab.dirnames.cnt);
+	for (unsigned i = 0; i < tab.dirnames.cnt; i++) {
+	    if (strpos == strend)
+		return ERR("bad dirnames");
+	    if (*strpos != '/')
+		return ERR("bad dirnames");
+	    size_t len = strlen(strpos);
+	    if (len > 0xffff)
+		return ERR("bad dirnames");
+	    dn[i] = strpos - h->strtab;
+	    dl[i] = len;
+	    strpos += len + 1;
+	}
+	// Now replace di with dn.
+	for (unsigned i = 0; i < fileCount; i++) {
+	    unsigned j = ff[i].dn;
+	    ff[i].dn = dn[j];
+	    ff[i].dlen = dl[j];
+	}
+    }
+
+    // Take a small string into a fixed-size buffer.
+#define TakeSB(te, buf, s)				\
+    do {						\
+	unsigned size = te->nextoff - te->off;		\
+	if (size > sizeof buf)				\
+	    return ERR(s " too long");			\
+	if (reada(fda, buf, size) != size)		\
+	    return ERR("cannot read header data");	\
+	doff += size;					\
+	if (buf[size-1] != '\0')			\
+	    return ERR("malformed string tag");		\
+	if (buf[0] == '\0')				\
+	    return ERR("empty " s);			\
+    } while (0)
+
+compressor:
+    te = &tab.payloadcompressor;
+    if (te->cnt) {
+	SkipTo(te->off);
+	TakeSB(te, h->zprog, "payloadcompressor");
+    }
+    else
+	memcpy(h->zprog, "gzip", sizeof "gzip");
+
+    te = &tab.longfilesizes;
+    if (te->cnt) {
+	SkipTo(te->off);
+	unsigned long long longfsize;
+	Taking(te, fileCount, longfsize, "longfilesizes");
+	for (unsigned i = 0; i < fileCount; i++) {
+	    Read1(longfsize);
+	    longfsize = be64toh(longfsize);
+	    if (longfsize > 0xffffFFFFffffUL)
+		return ERR("bad longfilesizes");
+	    ff[i].size = longfsize;
+	}
+    }
+
+    SkipTo(hdr.dl);
 
     return true;
+}
+
+void header_freedata(struct header *h)
+{
+    if (h->fileCount)
+	free(h->ff);
 }
