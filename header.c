@@ -433,6 +433,7 @@ compressor:
 
     SkipTo(hdr.dl);
 
+    h->prevFound = -1;
     return true;
 }
 
@@ -440,4 +441,126 @@ void header_freedata(struct header *h)
 {
     if (h->fileCount)
 	free(h->ff);
+}
+
+// Compare two strings whose lengths are known.
+static inline int strlencmp(const char *s1, size_t len1, const char *s2, size_t len2)
+{
+    if (len1 == len2)
+	return memcmp(s1, s2, len1);
+    if (len1 < len2) {
+	int cmp = memcmp(s1, s2, len1);
+	// If cmp == 0, still s1 < s2, because s1 is shorter.
+	return cmp - (cmp == 0);
+    }
+    int cmp = memcmp(s1, s2, len2);
+    return cmp + (cmp == 0);
+}
+
+struct fi *header_find(struct header *h, const char *fname, size_t flen)
+{
+    // Initialize the binary search range.
+    size_t lo = 0, hi = h->fileCount;
+
+    // Direct the first iteration of the binary search loop to examine
+    // the element following the previously found one, rather than the
+    // middle element.  Since filenames in the payload are mostly sorted
+    // (the exception being hardlinks), we expect the immediate hit.
+    size_t at = ++h->prevFound;
+    if (at >= h->fileCount) {
+	assert(h->fileCount > 0);
+	at = (lo + hi) / 2;
+    }
+
+    // If no dirnames need to be considered, run a much simplified version
+    // of the binary search loop (which also delivers better performance).
+    if (h->src.rpm || h->old.fnames) {
+	while (1) {
+	    struct fi *fi = &h->ff[at];
+	    int cmp = strlencmp(fname, flen, h->strtab + fi->bn, fi->blen);
+	    if (cmp == 0) {
+		h->prevFound = at;
+		return fi;
+	    }
+	    if (cmp < 0)
+		hi = at;
+	    else
+		lo = at + 1;
+	    if (lo >= hi)
+		return NULL;
+	    at = (lo + hi) / 2;
+	}
+    }
+
+    // Digest fname.
+    const char *dn = fname;
+    const char *slash = strrchr(fname, '/');
+    assert(slash);
+    const char *bn = slash + 1;
+    // Dirnames have trailing slashes.
+    size_t dlen = bn - fname;
+    size_t blen = flen - dlen;
+
+    // Previous fi->dn against which dn was matched.
+    unsigned lastdn = -1;
+    int dircmp = 0;
+
+    while (1) {
+	struct fi *fi = &h->ff[at];
+	int cmp;
+	if (dlen == fi->dlen) {
+	    if (fi->dn != lastdn) {
+		dircmp = memcmp(dn, h->strtab + fi->dn, dlen);
+		lastdn = fi->dn;
+	    }
+	    cmp = dircmp;
+	    if (cmp == 0) {
+		// If dirnames are equal, proceed with basenames.  This is
+		// the only case where both basenames need to be compared.
+		cmp = strlencmp(bn, blen, h->strtab + fi->bn, fi->blen);
+		if (cmp == 0) {
+		    h->prevFound = at;
+		    return fi;
+		}
+	    }
+	}
+	else if (dlen < fi->dlen) {
+	    // dn is shorter than fi->dn, the result of comparsion should only
+	    // depend on [dn,bn] and fi->dn, but not on fi->bn.  Thus dircmp
+	    // can cache a full comparsion, not just the dirname comparison.
+	    if (fi->dn != lastdn) {
+		dircmp = memcmp(dn, h->strtab + fi->dn, dlen);
+		lastdn = fi->dn;
+		if (dircmp == 0) {
+		    // dn is shorter than fi->dn, compare bn with the rest of fi->dn.
+		    dircmp = strlencmp(bn, blen, h->strtab + fi->dn + dlen, fi->dlen - dlen);
+		    // Equality should never hold, even with dir+subdir pairs,
+		    // because dirnames have trailing slashes.
+		    if (dircmp == 0)
+			return NULL;
+		}
+	    }
+	    cmp = dircmp;
+	}
+	else {
+	    if (fi->dn != lastdn) {
+		dircmp = memcmp(fname, h->strtab + fi->dn, fi->dlen);
+		lastdn = fi->dn;
+	    }
+	    cmp = dircmp;
+	    if (cmp == 0) {
+		// dn is longer than fi->dn, compare the rest of dn with fi->bn.
+		cmp = strlencmp(dn + fi->dlen, dlen - fi->dlen, h->strtab + fi->bn, fi->blen);
+		if (cmp == 0)
+		    return NULL;
+	    }
+	}
+	if (cmp < 0)
+	    hi = at;
+	else
+	    lo = at + 1;
+	if (lo >= hi)
+	    return NULL;
+	at = (lo + hi) / 2;
+    }
 }

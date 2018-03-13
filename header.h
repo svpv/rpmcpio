@@ -22,9 +22,10 @@
 
 struct header {
     unsigned fileCount;
+    unsigned prevFound;
     union { bool rpm; } src;
     union { bool fnames; } old;
-    char zprog[10];
+    char zprog[14];
     struct fi {
 	unsigned bn;
 	unsigned dn;
@@ -42,5 +43,8 @@ struct header {
 
 bool header_read(struct header *h, struct fda *fda, const char **err);
 void header_freedata(struct header *h);
+
+// Find file info by filename.  Ruturns NULL if not found.
+struct fi *header_find(struct header *h, const char *fname, size_t flen);
 
 #pragma GCC visibility pop
