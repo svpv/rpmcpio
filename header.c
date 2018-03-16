@@ -21,8 +21,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <arpa/inet.h>
 #include <endian.h>
+#include <sys/stat.h>
 #include "reada.h"
 #include "header.h"
 
@@ -93,8 +95,14 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #define RPMTAG_OLDFILENAMES      1027
 #define RPMTAG_FILESIZES         1028
 #define RPMTAG_FILEMODES         1030
+#define RPMTAG_FILEMTIMES        1034
+#define RPMTAG_FILELINKTOS       1036
 #define RPMTAG_FILEFLAGS         1037
+#define RPMTAG_FILEUSERNAME      1039
+#define RPMTAG_FILEGROUPNAME     1040
 #define RPMTAG_SOURCERPM         1044
+#define RPMTAG_FILEDEVICES       1095
+#define RPMTAG_FILEINODES        1096
 #define RPMTAG_DIRINDEXES        1116
 #define RPMTAG_BASENAMES         1117
 #define RPMTAG_DIRNAMES          1118
@@ -108,8 +116,14 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	struct tabent oldfilenames;
 	struct tabent filesizes;
 	struct tabent filemodes;
+	struct tabent filemtimes;
+	struct tabent filelinktos;
 	struct tabent fileflags;
+	struct tabent fileusername;
+	struct tabent filegroupname;
 	struct tabent sourcerpm;
+	struct tabent filedevices;
+	struct tabent fileinodes;
 	struct tabent dirindexes;
 	struct tabent basenames;
 	struct tabent dirnames;
@@ -121,8 +135,14 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	.oldfilenames      = { RPMTAG_OLDFILENAMES, RPM_STRING_ARRAY_TYPE },
 	.filesizes         = { RPMTAG_FILESIZES, RPM_INT32_TYPE },
 	.filemodes         = { RPMTAG_FILEMODES, RPM_INT16_TYPE },
+	.filemtimes        = { RPMTAG_FILEMTIMES, RPM_INT32_TYPE },
+	.filelinktos       = { RPMTAG_FILELINKTOS, RPM_STRING_ARRAY_TYPE },
 	.fileflags         = { RPMTAG_FILEFLAGS, RPM_INT32_TYPE },
+	.fileusername      = { RPMTAG_FILEUSERNAME, RPM_STRING_ARRAY_TYPE },
+	.filegroupname     = { RPMTAG_FILEGROUPNAME, RPM_STRING_ARRAY_TYPE },
 	.sourcerpm         = { RPMTAG_SOURCERPM, RPM_STRING_TYPE },
+	.filedevices       = { RPMTAG_FILEDEVICES, RPM_INT32_TYPE },
+	.fileinodes        = { RPMTAG_FILEINODES, RPM_INT32_TYPE },
 	.dirindexes        = { RPMTAG_DIRINDEXES, RPM_INT32_TYPE },
 	.basenames         = { RPMTAG_BASENAMES, RPM_STRING_ARRAY_TYPE },
 	.dirnames          = { RPMTAG_DIRNAMES, RPM_STRING_ARRAY_TYPE },
@@ -174,82 +194,106 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     if (h->src.rpm ^ !tab.sourcerpm.cnt)
 	return ERR("lead.type and header.sourcerpm do not match");
 
+    // FILEMODES and FILEFLAGS are mandatory, and determine file count.
     if (tab.filemodes.cnt != tab.fileflags.cnt)
 	return ERR("file count mismatch");
 
-    // Either FILESIZES or LONGFILESIZES
-    if (tab.filesizes.cnt == tab.filemodes.cnt) {
-	if (tab.longfilesizes.cnt)
-	    return ERR("bad filesizes");
-    }
-    else {
-	if (tab.longfilesizes.cnt != tab.filemodes.cnt)
-	    return ERR("bad filesizes");
-	if (tab.filesizes.cnt)
-	    return ERR("bad filesizes");
-    }
-
-    // Either OLDFILENAMES or BASENAMES+DIRNAMES+DIRINDEXES.
-    if (tab.filemodes.cnt == tab.oldfilenames.cnt) {
-	if (tab.basenames.cnt || tab.dirnames.cnt || tab.dirindexes.cnt)
-	    return ERR("bad filenames");
-    }
-    else {
-	if (tab.filemodes.cnt != tab.basenames.cnt ||
-	    tab.basenames.cnt != tab.dirindexes.cnt)
-	    return ERR("bad filenames");
-	if (tab.oldfilenames.cnt)
-	    return ERR("bad filenames");
-	// Suppose the dirnames count is too big, so what?  Couldn't it be
-	// that some dirnames are unused?  Well, this can induce integer
-	// overlow with malloc.  (And the package is probably corrupt.)
-	if (tab.dirnames.cnt > tab.basenames.cnt)
-	    return ERR("bad dirnames");
-	// Whether dirnames count is too small is determined at the time
-	// of unpacking dirindexes.
-    }
-    h->old.fnames = tab.oldfilenames.cnt;
+    // File info, to be malloc'd.
+    struct fi *ffi = h->ffi = NULL;
+    struct fx *ffx = h->ffx = NULL;
 
     // Current offset within the header's data store.
     unsigned doff = 0;
-
-    // File info, to be malloc'd.
-    struct fi *ff = NULL;
 
     // File count is zero?  Fast forward to PayloadCompressor.
     unsigned fileCount = h->fileCount = tab.filemodes.cnt;
     if (!fileCount)
 	goto compressor;
 
+    // If it's LONGFILESIZES, we're about to load more tags.
+    if (tab.longfilesizes.cnt) {
+	if (tab.longfilesizes.cnt != fileCount || tab.filesizes.cnt)
+	    return ERR("bad longfilesizes");
+	if (tab.filemtimes.cnt != fileCount)
+	    return ERR("bad filemtimes");
+	if (tab.filelinktos.cnt != fileCount)
+	    return ERR("bad filelinktos");
+    }
+
+    // Either OLDFILENAMES or BASENAMES+DIRNAMES+DIRINDEXES.
+    if (tab.oldfilenames.cnt == fileCount) {
+	if (tab.basenames.cnt)
+	    return ERR("bad filenames");
+    }
+    else {
+	if (tab.basenames.cnt != fileCount || tab.oldfilenames.cnt)
+	    return ERR("bad filenames");
+	// Will directories be loaded?
+	if (!h->src.rpm) {
+	    if (tab.dirindexes.cnt != fileCount)
+		return ERR("bad dirindexes");
+	    // Suppose the dirnames count is too big, so what?  Couldn't it be
+	    // that some dirnames are unused?  Well, this can induce integer
+	    // overflow with malloc.  (And the package is probably corrupt.)
+	    if (tab.dirnames.cnt > tab.basenames.cnt)
+		return ERR("bad dirnames");
+	    // Whether dirnames count is too small is determined at the time
+	    // of unpacking dirindexes.
+	}
+    }
+    h->old.fnames = tab.oldfilenames.cnt;
+
     // Assume each file takes at least 16 bytes in the data store.
     // This is mostly to avoid integer overflow with malloc.
     if (h->fileCount > (16<<20))
 	return ERR("bad file count");
     // Allocate in a single chunk.
-    size_t alloc = fileCount * sizeof(*ff);
+    size_t alloc = fileCount * sizeof(*ffi);
+#define tabSize(x) (tab.x.nextoff - tab.x.off)
     if (tab.oldfilenames.cnt)
-	alloc += tab.oldfilenames.nextoff - tab.oldfilenames.off;
-    else {
-	alloc += tab.basenames.nextoff - tab.basenames.off;
-	// Directories only loaded for binary rpms.
-	if (!h->src.rpm) {
-	    alloc += tab.dirnames.nextoff - tab.dirnames.off;
-	    // Will remap Dirindexes to direct offsets into strtab.
-	    alloc += tab.dirnames.cnt * 6 + 3;
-	}
+	alloc += tabSize(oldfilenames);
+    if (tab.longfilesizes.cnt) {
+	alloc += fileCount * sizeof(*ffx);
+	alloc += tabSize(filelinktos);
     }
-    ff = h->ff = malloc(alloc);
-    if (!ff)
+    // We have a few stages which need temporary storage:
+    // - read fileusername and convert them to fi->uid
+    // - read filegroupname and convert them to fi->gid
+    // - read filedevices and fileinodes to detect hardinks and set fx->ino
+    // - remap dirindexes to direct offsets into strtab
+    // Trying to replay the events and estimate the usage precisely.
+    size_t morealloc = 0;
+#define peakAlloc(s) morealloc = (s) > morealloc ? (s) : morealloc
+    peakAlloc(tabSize(fileusername));
+    peakAlloc(tabSize(filegroupname));
+    if (tab.longfilesizes.cnt)
+	peakAlloc(fileCount * 12);
+    if (tab.basenames.cnt) {
+	size_t s = tabSize(basenames);
+	if (!h->src.rpm)
+	    s += tabSize(dirnames) + fileCount * 6;
+	peakAlloc(s);
+    }
+    alloc += morealloc + 4; // strtab[0] + align to 4
+    ffi = h->ffi = malloc(alloc);
+    if (!ffi)
 	return ERR("malloc failed");
-    h->strtab = (void *) (ff + fileCount);
+    if (tab.longfilesizes.cnt) {
+	ffx = h->ffx = (void *) (ffi + fileCount);
+	h->strtab = (void *) (ffx + fileCount);
+    }
+    else
+	h->strtab = (void *) (ffi + fileCount);
 
     // Fill the strtab with basenames and dirnames.
     char *strpos = h->strtab;
+    // E.g. linkto=0 points to an empty string.
+    *strpos++ = '\0';
     // The end of a segment loaded into the strtab.
     char *strend;
 
 #undef ERR
-#define ERR(s) (free(ff), *err = s, false)
+#define ERR(s) (free(ffi), *err = s, false)
 
 #define SkipTo(off)					\
     do {						\
@@ -295,21 +339,11 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	    size_t len = strlen(strpos);
 	    if (len > 0xffff)
 		return ERR("bad filenames");
-	    ff[i].bn = strpos - h->strtab;
-	    ff[i].blen = len;
+	    ffi[i].bn = strpos - h->strtab;
+	    ffi[i].blen = len;
 	    strpos += len + 1;
-	    // dn and dlen not set for h->old.fnames
-	}
-    }
-
-    te = &tab.filesizes;
-    if (te->cnt) {
-	SkipTo(te->off);
-	unsigned fsize;
-	Taking(te, fileCount, fsize, "filesizes");
-	for (unsigned i = 0; i < fileCount; i++) {
-	    Read1(fsize);
-	    ff[i].size = ntohl(fsize);
+	    // dn and dlen not set for h->old.fnames,
+	    // neither for h->src.rpm
 	}
     }
 
@@ -319,7 +353,42 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     Taking(te, fileCount, fmode, "filemodes");
     for (unsigned i = 0; i < fileCount; i++) {
 	Read1(fmode);
-	ff[i].mode = ntohs(fmode);
+	ffi[i].mode = ntohs(fmode);
+	// Zero out fi->seen with the first unconditional field.
+	ffi[i].seen = false;
+    }
+
+    if (ffx) {
+	te = &tab.filemtimes;
+	SkipTo(te->off);
+	unsigned fmtime;
+	Taking(te, fileCount, fmtime, "filemtimes");
+	for (unsigned i = 0; i < fileCount; i++) {
+	    Read1(fmtime);
+	    ffx[i].mtime = ntohl(fmtime);
+	}
+
+	te = &tab.filelinktos;
+	SkipTo(te->off);
+	TakeS(te);
+	for (unsigned i = 0; i < fileCount; i++) {
+	    if (strpos == strend)
+		return ERR("bad filelinktos");
+	    if (*strpos == '\0') {
+		if (S_ISLNK(ffi[i].mode))
+		    return ERR("bad filelinktos");
+		ffx[i].linkto = 0;
+		strpos++;
+	    }
+	    else {
+		size_t len = strlen(strpos);
+		if (len >= PATH_MAX)
+		    return ERR("bad filelinktos");
+		ffx[i].linkto = strpos - h->strtab;
+		ffx[i].size = len;
+		strpos += len + 1;
+	    }
+	}
     }
 
     te = &tab.fileflags;
@@ -329,10 +398,42 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     for (unsigned i = 0; i < fileCount; i++) {
 	Read1(fflags);
 	fflags = ntohl(fflags);
-	if (fflags > 0xFFffff)
-	    return ERR("bad fileflags");
-	ff[i].fflags = fflags;
-	ff[i].seen = 0;
+	ffi[i].fflags = fflags;
+    }
+
+    // Fill strtab for a temporary pass, then reset.
+    char *savepos;
+
+    te = &tab.fileusername;
+    savepos = strpos;
+    TakeS(te);
+    for (unsigned i = 0; i < fileCount; i++) {
+	if (strpos == strend)
+	    return ERR("bad fileusername");
+	size_t len = strlen(strpos);
+	if (len == 0)
+	    return ERR("bad fileusername");
+	ffi[i].uid = len != 4 || memcmp(strpos, "root", 4);
+	strpos += len + 1;
+    }
+    strpos = savepos;
+
+    te = &tab.filegroupname;
+    savepos = strpos;
+    TakeS(te);
+    for (unsigned i = 0; i < fileCount; i++) {
+	if (strpos == strend)
+	    return ERR("bad filegroupname");
+	size_t len = strlen(strpos);
+	if (len == 0)
+	    return ERR("bad filegroupname");
+	ffi[i].gid = len != 4 || memcmp(strpos, "root", 4);
+	strpos += len + 1;
+    }
+    strpos = savepos;
+
+    if (ffx) {
+	// TODO: hardlink detection pass.
     }
 
     te = &tab.dirindexes;
@@ -346,7 +447,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	    if (dindex >= tab.dirnames.cnt)
 		return ERR("bad dirindexes");
 	    // Place raw di into dn, will update in just a moment.
-	    ff[i].dn = dindex;
+	    ffi[i].dn = dindex;
 	}
     }
 
@@ -360,8 +461,8 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	    size_t len = strlen(strpos);
 	    if (len > 0xffff)
 		return ERR("bad basenames");
-	    ff[i].bn = strpos - h->strtab;
-	    ff[i].blen = len;
+	    ffi[i].bn = strpos - h->strtab;
+	    ffi[i].blen = len;
 	    strpos += len + 1;
 	}
     }
@@ -387,9 +488,9 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	}
 	// Now replace di with dn.
 	for (unsigned i = 0; i < fileCount; i++) {
-	    unsigned j = ff[i].dn;
-	    ff[i].dn = dn[j];
-	    ff[i].dlen = dl[j];
+	    unsigned j = ffi[i].dn;
+	    ffi[i].dn = dn[j];
+	    ffi[i].dlen = dl[j];
 	}
     }
 
@@ -417,17 +518,19 @@ compressor:
     else
 	memcpy(h->zprog, "gzip", sizeof "gzip");
 
-    te = &tab.longfilesizes;
-    if (te->cnt) {
+    if (ffx) {
+	te = &tab.longfilesizes;
 	SkipTo(te->off);
 	unsigned long long longfsize;
 	Taking(te, fileCount, longfsize, "longfilesizes");
 	for (unsigned i = 0; i < fileCount; i++) {
 	    Read1(longfsize);
+	    if (S_ISLNK(ffi[i].mode))
+		continue; // already set to target length
 	    longfsize = be64toh(longfsize);
 	    if (longfsize > 0xffffFFFFffffUL)
 		return ERR("bad longfilesizes");
-	    ff[i].size = longfsize;
+	    ffx[i].size = longfsize;
 	}
     }
 
@@ -440,7 +543,7 @@ compressor:
 void header_freedata(struct header *h)
 {
     if (h->fileCount)
-	free(h->ff);
+	free(h->ffi);
 }
 
 // Compare two strings whose lengths are known.
@@ -457,7 +560,7 @@ static inline int strlencmp(const char *s1, size_t len1, const char *s2, size_t 
     return cmp + (cmp == 0);
 }
 
-struct fi *header_find(struct header *h, const char *fname, size_t flen)
+unsigned header_find(struct header *h, const char *fname, size_t flen)
 {
     // Initialize the binary search range.
     size_t lo = 0, hi = h->fileCount;
@@ -476,18 +579,18 @@ struct fi *header_find(struct header *h, const char *fname, size_t flen)
     // of the binary search loop (which also delivers better performance).
     if (h->src.rpm || h->old.fnames) {
 	while (1) {
-	    struct fi *fi = &h->ff[at];
+	    struct fi *fi = &h->ffi[at];
 	    int cmp = strlencmp(fname, flen, h->strtab + fi->bn, fi->blen);
 	    if (cmp == 0) {
 		h->prevFound = at;
-		return fi;
+		return at;
 	    }
 	    if (cmp < 0)
 		hi = at;
 	    else
 		lo = at + 1;
 	    if (lo >= hi)
-		return NULL;
+		return -1;
 	    at = (lo + hi) / 2;
 	}
     }
@@ -506,7 +609,7 @@ struct fi *header_find(struct header *h, const char *fname, size_t flen)
     int dircmp = 0;
 
     while (1) {
-	struct fi *fi = &h->ff[at];
+	struct fi *fi = &h->ffi[at];
 	int cmp;
 	if (dlen == fi->dlen) {
 	    if (fi->dn != lastdn) {
@@ -520,7 +623,7 @@ struct fi *header_find(struct header *h, const char *fname, size_t flen)
 		cmp = strlencmp(bn, blen, h->strtab + fi->bn, fi->blen);
 		if (cmp == 0) {
 		    h->prevFound = at;
-		    return fi;
+		    return at;
 		}
 	    }
 	}
@@ -537,7 +640,7 @@ struct fi *header_find(struct header *h, const char *fname, size_t flen)
 		    // Equality should never hold, even with dir+subdir pairs,
 		    // because dirnames have trailing slashes.
 		    if (dircmp == 0)
-			return NULL;
+			return -1;
 		}
 	    }
 	    cmp = dircmp;
@@ -552,7 +655,7 @@ struct fi *header_find(struct header *h, const char *fname, size_t flen)
 		// dn is longer than fi->dn, compare the rest of dn with fi->bn.
 		cmp = strlencmp(dn + fi->dlen, dlen - fi->dlen, h->strtab + fi->bn, fi->blen);
 		if (cmp == 0)
-		    return NULL;
+		    return -1;
 	    }
 	}
 	if (cmp < 0)
@@ -560,7 +663,7 @@ struct fi *header_find(struct header *h, const char *fname, size_t flen)
 	else
 	    lo = at + 1;
 	if (lo >= hi)
-	    return NULL;
+	    return -1;
 	at = (lo + hi) / 2;
     }
 }

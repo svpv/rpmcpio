@@ -26,25 +26,39 @@ struct header {
     union { bool rpm; } src;
     union { bool fnames; } old;
     char zprog[14];
+    // Basic info, maps fname->(mode,fflags,uid,gid) + dup detector.
     struct fi {
 	unsigned bn;
 	unsigned dn;
 	unsigned short blen;
 	unsigned short dlen;
-	// rpmbuild uses fflags' high bits for RPMFILE_EXCLUDE etc.
-	unsigned fflags : 24;
-	unsigned seen : 8;
-	unsigned long long size : 48;
-	unsigned long long mode : 16;
-    } *ff;
+	unsigned fflags;
+	unsigned short mode;
+	unsigned char uid: 4;
+	unsigned char gid: 4;
+	bool seen;
+    } *ffi;
+    // Additional info for large files / excluded cpio entries.
+    struct fx {
+	unsigned ino;
+	unsigned mtime;
+	unsigned linkto;
+	struct {
+	    unsigned long long size : 48;
+	    unsigned short nlink;
+	} __attribute__((packed,aligned(4)));
+    } *ffx;
     // Strings point here, e.g. strlen(strtab + dn) == dlen.
     char *strtab;
 };
 
+static_assert(sizeof(struct fi) == 20, "struct fi tightly packed");
+static_assert(sizeof(struct fx) == 20, "struct fx tightly packed");
+
 bool header_read(struct header *h, struct fda *fda, const char **err);
 void header_freedata(struct header *h);
 
-// Find file info by filename.  Ruturns NULL if not found.
-struct fi *header_find(struct header *h, const char *fname, size_t flen);
+// Find file info by filename.  Returns the index into ffi[], -1 if not found.
+unsigned header_find(struct header *h, const char *fname, size_t flen);
 
 #pragma GCC visibility pop
