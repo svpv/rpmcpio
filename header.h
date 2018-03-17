@@ -42,7 +42,6 @@ struct header {
     struct fx {
 	unsigned ino;
 	unsigned mtime;
-	unsigned linkto;
 	struct {
 	    unsigned long long size : 48;
 	    unsigned short nlink;
@@ -53,7 +52,7 @@ struct header {
 };
 
 static_assert(sizeof(struct fi) == 20, "struct fi tightly packed");
-static_assert(sizeof(struct fx) == 20, "struct fx tightly packed");
+static_assert(sizeof(struct fx) == 16, "struct fx tightly packed");
 
 bool header_read(struct header *h, struct fda *fda, const char **err);
 void header_freedata(struct header *h);

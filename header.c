@@ -96,7 +96,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #define RPMTAG_FILESIZES         1028
 #define RPMTAG_FILEMODES         1030
 #define RPMTAG_FILEMTIMES        1034
-#define RPMTAG_FILELINKTOS       1036
 #define RPMTAG_FILEFLAGS         1037
 #define RPMTAG_FILEUSERNAME      1039
 #define RPMTAG_FILEGROUPNAME     1040
@@ -117,7 +116,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	struct tabent filesizes;
 	struct tabent filemodes;
 	struct tabent filemtimes;
-	struct tabent filelinktos;
 	struct tabent fileflags;
 	struct tabent fileusername;
 	struct tabent filegroupname;
@@ -136,7 +134,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	.filesizes         = { RPMTAG_FILESIZES, RPM_INT32_TYPE },
 	.filemodes         = { RPMTAG_FILEMODES, RPM_INT16_TYPE },
 	.filemtimes        = { RPMTAG_FILEMTIMES, RPM_INT32_TYPE },
-	.filelinktos       = { RPMTAG_FILELINKTOS, RPM_STRING_ARRAY_TYPE },
 	.fileflags         = { RPMTAG_FILEFLAGS, RPM_INT32_TYPE },
 	.fileusername      = { RPMTAG_FILEUSERNAME, RPM_STRING_ARRAY_TYPE },
 	.filegroupname     = { RPMTAG_FILEGROUPNAME, RPM_STRING_ARRAY_TYPE },
@@ -216,8 +213,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	    return ERR("bad longfilesizes");
 	if (tab.filemtimes.cnt != fileCount)
 	    return ERR("bad filemtimes");
-	if (tab.filelinktos.cnt != fileCount)
-	    return ERR("bad filelinktos");
     }
 
     // Either OLDFILENAMES or BASENAMES+DIRNAMES+DIRINDEXES.
@@ -252,10 +247,8 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #define tabSize(x) (tab.x.nextoff - tab.x.off)
     if (tab.oldfilenames.cnt)
 	alloc += tabSize(oldfilenames);
-    if (tab.longfilesizes.cnt) {
+    if (tab.longfilesizes.cnt)
 	alloc += fileCount * sizeof(*ffx);
-	alloc += tabSize(filelinktos);
-    }
     // We have a few stages which need temporary storage:
     // - read fileusername and convert them to fi->uid
     // - read filegroupname and convert them to fi->gid
@@ -366,28 +359,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	for (unsigned i = 0; i < fileCount; i++) {
 	    Read1(fmtime);
 	    ffx[i].mtime = ntohl(fmtime);
-	}
-
-	te = &tab.filelinktos;
-	SkipTo(te->off);
-	TakeS(te);
-	for (unsigned i = 0; i < fileCount; i++) {
-	    if (strpos == strend)
-		return ERR("bad filelinktos");
-	    if (*strpos == '\0') {
-		if (S_ISLNK(ffi[i].mode))
-		    return ERR("bad filelinktos");
-		ffx[i].linkto = 0;
-		strpos++;
-	    }
-	    else {
-		size_t len = strlen(strpos);
-		if (len >= PATH_MAX)
-		    return ERR("bad filelinktos");
-		ffx[i].linkto = strpos - h->strtab;
-		ffx[i].size = len;
-		strpos += len + 1;
-	    }
 	}
     }
 
