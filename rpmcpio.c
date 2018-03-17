@@ -253,8 +253,8 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	// Non-last hardlink?
 	if (cpio->hard.cnt < cpio->hard.nlink) {
 	    // Symbolic links can be hardlinked, too.  With rpm-4.0, their size
-	    // was misleading.  Starting with rpm-4.12.0-alpha~173, only
-	    // regular files can have hardlinks.
+	    // was misleading.  Starting with rpm-4.6.0-rc1~93, only regular
+	    // files can have hardlinks.
 	    if (S_ISLNK(ent->mode)) {
 		if (0)
 		    warn("%s: %s: hardlinked symlink", cpio->rpmbname, cpio->fname);
