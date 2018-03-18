@@ -207,6 +207,12 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     if (!fileCount)
 	goto compressor;
 
+    // User/group IDs must match file count.
+    if (tab.fileusername.cnt != fileCount)
+	return ERR("bad fileusername");
+    if (tab.filegroupname.cnt != fileCount)
+	return ERR("bad filegroupname");
+
     // If it's LONGFILESIZES, we're about to load more tags.
     if (tab.longfilesizes.cnt) {
 	if (tab.longfilesizes.cnt != fileCount || tab.filesizes.cnt)
@@ -244,21 +250,19 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	return ERR("bad file count");
     // Allocate in a single chunk.
     size_t alloc = fileCount * sizeof(*ffi);
+    if (tab.longfilesizes.cnt)
+	alloc += fileCount * sizeof(*ffx);
 #define tabSize(x) (tab.x.nextoff - tab.x.off)
     if (tab.oldfilenames.cnt)
 	alloc += tabSize(oldfilenames);
-    if (tab.longfilesizes.cnt)
-	alloc += fileCount * sizeof(*ffx);
+    alloc += tabSize(fileusername);
+    alloc += tabSize(filegroupname);
     // We have a few stages which need temporary storage:
-    // - read fileusername and convert them to fi->uid
-    // - read filegroupname and convert them to fi->gid
     // - read filedevices and fileinodes to detect hardinks and set fx->ino
     // - remap dirindexes to direct offsets into strtab
     // Trying to replay the events and estimate the usage precisely.
     size_t morealloc = 0;
 #define peakAlloc(s) morealloc = (s) > morealloc ? (s) : morealloc
-    peakAlloc(tabSize(fileusername));
-    peakAlloc(tabSize(filegroupname));
     if (tab.longfilesizes.cnt)
 	peakAlloc(fileCount * 12);
     if (tab.basenames.cnt) {
@@ -267,7 +271,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	    s += tabSize(dirnames) + fileCount * 6;
 	peakAlloc(s);
     }
-    alloc += morealloc + 4; // strtab[0] + align to 4
+    alloc += morealloc + 4; // strtab[0] + align to 4 / padding for IDs
     ffi = h->ffi = malloc(alloc);
     if (!ffi)
 	return ERR("malloc failed");
@@ -280,7 +284,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 
     // Fill the strtab with basenames and dirnames.
     char *strpos = h->strtab;
-    // E.g. linkto=0 points to an empty string.
+    // E.g. uid=0 means "root".
     *strpos++ = '\0';
     // The end of a segment loaded into the strtab.
     char *strend;
@@ -372,36 +376,29 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	ffi[i].fflags = fflags;
     }
 
-    // Fill strtab for a temporary pass, then reset.
-    char *savepos;
+#define TakeIDs(m_tab, m_fi)				\
+    do {						\
+	char *needpos = strpos;				\
+	te = &tab.m_tab;				\
+	TakeS(te);					\
+	memset(strend - 1, '\0', 4);			\
+	for (unsigned i = 0; i < fileCount; i++) {	\
+	    if (strpos == strend || *strpos == '\0')	\
+		return ERR("bad " #m_tab);		\
+	    if (memcmp(strpos, "root", 5) == 0) {	\
+		ffi[i].m_fi = 0;			\
+		strpos += 5;				\
+		continue;				\
+	    }						\
+	    ffi[i].m_fi = strpos - h->strtab;		\
+	    strpos += strlen(strpos) + 1;		\
+	    needpos = strpos;				\
+	}						\
+	strpos = needpos;				\
+    } while (0)
 
-    te = &tab.fileusername;
-    savepos = strpos;
-    TakeS(te);
-    for (unsigned i = 0; i < fileCount; i++) {
-	if (strpos == strend)
-	    return ERR("bad fileusername");
-	size_t len = strlen(strpos);
-	if (len == 0)
-	    return ERR("bad fileusername");
-	ffi[i].uid = len != 4 || memcmp(strpos, "root", 4);
-	strpos += len + 1;
-    }
-    strpos = savepos;
-
-    te = &tab.filegroupname;
-    savepos = strpos;
-    TakeS(te);
-    for (unsigned i = 0; i < fileCount; i++) {
-	if (strpos == strend)
-	    return ERR("bad filegroupname");
-	size_t len = strlen(strpos);
-	if (len == 0)
-	    return ERR("bad filegroupname");
-	ffi[i].gid = len != 4 || memcmp(strpos, "root", 4);
-	strpos += len + 1;
-    }
-    strpos = savepos;
+    TakeIDs(fileusername, uid);
+    TakeIDs(filegroupname, gid);
 
     if (ffx) {
 	// TODO: hardlink detection pass.

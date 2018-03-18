@@ -34,24 +34,22 @@ struct header {
 	unsigned short dlen;
 	unsigned fflags;
 	unsigned short mode;
-	unsigned char uid: 4;
-	unsigned char gid: 4;
-	bool seen;
+	unsigned short seen;
+	unsigned uid;
+	unsigned gid;
     } *ffi;
     // Additional info for large files / excluded cpio entries.
     struct fx {
 	unsigned ino;
 	unsigned mtime;
-	struct {
-	    unsigned long long size : 48;
-	    unsigned short nlink;
-	} __attribute__((packed,aligned(4)));
+	unsigned long long size : 48;
+	unsigned long long nlink : 16;
     } *ffx;
     // Strings point here, e.g. strlen(strtab + dn) == dlen.
     char *strtab;
 };
 
-static_assert(sizeof(struct fi) == 20, "struct fi tightly packed");
+static_assert(sizeof(struct fi) == 28, "struct fi tightly packed");
 static_assert(sizeof(struct fx) == 16, "struct fx tightly packed");
 
 bool header_read(struct header *h, struct fda *fda, const char **err);
