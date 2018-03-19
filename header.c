@@ -26,6 +26,7 @@
 #include <endian.h>
 #include <sys/stat.h>
 #include "reada.h"
+#include "qsort.h"
 #include "header.h"
 
 #define ERR(s) (*err = s, false)
@@ -264,7 +265,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     size_t morealloc = 0;
 #define peakAlloc(s) morealloc = (s) > morealloc ? (s) : morealloc
     if (tab.longfilesizes.cnt)
-	peakAlloc(fileCount * 12);
+	peakAlloc(fileCount * 8 + 4); // (ino,at) + ino sentinel
     if (tab.basenames.cnt) {
 	size_t s = tabSize(basenames);
 	if (!h->src.rpm)
@@ -400,8 +401,74 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     TakeIDs(fileusername, uid);
     TakeIDs(filegroupname, gid);
 
+    // Hardlink detection pass.
     if (ffx) {
-	// TODO: hardlink detection pass.
+	struct hi { unsigned ino, at; }; // hardlink info
+	struct hi *hi = (void *) (((uintptr_t) strpos + 3) & ~3);
+	unsigned nhi = 0;
+
+	// If all the inodes are sorted (less than or equal).
+	bool le = true;
+	// If some inodes are equal (only makes sense if sorted).
+	bool eq = false;
+
+	te = &tab.fileinodes;
+	SkipTo(te->off);
+	unsigned ino, lastino;
+	Taking(te, fileCount, ino, "fileinodes");
+	for (unsigned i = 0; i < fileCount; i++) {
+	    Read1(ino);
+	    ino = ntohl(ino);
+	    // Store the inode, and assume that nlink is 1.
+	    ffx[i].ino = ino;
+	    ffx[i].nlink = 1;
+	    // With modern rpm capable of creating/handling large files,
+	    // only regular files can be hardlinks.  Ghost files are not
+	    // part of cpio, and do not add to hardlink counts.
+#define RPMFILE_GHOST 64
+	    if (!S_ISREG(ffi[i].mode) || (ffi[i].fflags & RPMFILE_GHOST))
+		continue;
+	    if (nhi) {
+		le &= lastino <= ino;
+		eq |= lastino == ino;
+	    }
+	    lastino = ino;
+	    hi[nhi++] = (struct hi) { ino, i };
+	}
+
+	if (!le) {
+	    // Regroup hi[] by inode.
+#define hiLess(i, j) hi[i].ino < hi[j].ino
+	    struct hi swap;
+#define hiSwap(i, j) swap = hi[i], hi[i] = hi[j], hi[j] = swap
+	    QSORT(nhi, hiLess, hiSwap);
+	    // Assume there are some inodes that are equal.  Could overload
+	    // hiLess to do the job, but it is invoked O(n log n) times.
+	    // And a separate loop is not a clear win either.
+	    eq = true;
+	}
+
+	// Detect hardlink sets and update ffx[*].nlink.
+	if (eq)
+	for (struct hi *end = hi + nhi; hi < end - 1; ) {
+	    unsigned ino = hi->ino;
+	    if (hi[1].ino != ino) {
+		hi++;
+		continue;
+	    }
+	    unsigned nlink = 2;
+	    end->ino = ~ino; // the sentinel
+	    while (hi[nlink].ino == ino)
+		nlink++;
+	    if (nlink > 0xffff)
+		return ERR("bad nlink");
+	    for (unsigned i = 0; i < nlink; i++) {
+		unsigned at = hi[i].at;
+		assert(ffx[at].ino == ino);
+		ffx[at].nlink = nlink;
+	    }
+	    hi += nlink;
+	}
     }
 
     te = &tab.dirindexes;
