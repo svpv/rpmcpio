@@ -7,7 +7,7 @@ License: MIT
 Group: System/Libraries
 
 URL: https://github.com/svpv/rpmcpio
-Source: %name-%version.tar
+Source: rpmcpio-%version.tar
 
 # Automatically added by buildreq on Mon Mar 05 2018
 BuildRequires: liblzma-devel librpm-devel zlib-devel
@@ -26,7 +26,7 @@ The rpmcpio library provides a simple API for reading the cpio archive
 of .rpm packages.  Packaged files can be iterated and looked into.
 
 %prep
-%setup -q
+%setup -q -n rpmcpio-%version
 
 %build
 make

@@ -1,1 +1,1 @@
-tar: .
+tar: . name=rpmcpio-@version@
