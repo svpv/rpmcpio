@@ -11,18 +11,21 @@ SRC = rpmcpio.c header.c zreader.c reada.c
 HDR = rpmcpio.h header.h zreader.h reada.h errexit.h
 
 RPM_OPT_FLAGS ?= -O2 -g -Wall
-SHARED = -fpic -shared -Wl,-soname=$(SONAME) -Wl,--no-undefined
+STD = -std=gnu11 -D_GNU_SOURCE
+LFS = $(shell getconf LFS_CFLAGS)
 LTO = -flto
+COMPILE = $(CC) $(RPM_OPT_FLAGS) $(STD) $(LFS) $(LTO)
+
+SHARED = -fpic -shared -Wl,-soname=$(SONAME) -Wl,--no-undefined
 LIBS = -lz -llzma
-DEFS =
 
 $(SONAME): $(SRC) $(HDR)
-	$(CC) $(RPM_OPT_FLAGS) $(LTO) $(DEFS) $(SHARED) -o $@ $(SRC) $(LIBS)
+	$(COMPILE) -o $@ $(SHARED) $(SRC) $(LIBS)
 example: example.c rpmcpio.h lib$(NAME).so
-	$(CC) $(RPM_OPT_FLAGS) -o $@ -I. $< -L. -l$(NAME) -Wl,-rpath,$$PWD
+	$(COMPILE) -o $@ -I. $< -L. -l$(NAME) -Wl,-rpath,$$PWD
 
 zreader: zreader.c zreader.h reada.c reada.h
-	$(CC) $(RPM_OPT_FLAGS) $(DEFS) -DZREADER_MAIN -o $@ zreader.c reada.c $(LIBS)
+	$(COMPILE) -o $@ -DZREADER_MAIN zreader.c reada.c $(LIBS)
 
 check: zreader
 	: simple decompression
