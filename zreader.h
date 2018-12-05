@@ -41,7 +41,10 @@ struct zreader {
 bool zreader_init(struct zreader *z, const char *zprog);
 
 // Free internal buffers in z->u.
-void zreader_fini(struct zreader *z);
+static inline void zreader_fini(struct zreader *z)
+{
+    z->fini(z);
+}
 
 // Read as much as possible, compressed frames concatenated automatically.
 // Returns the number of bytes read, 0 on EOF, (size_t) -1 on error.

@@ -275,11 +275,6 @@ bool zreader_init(struct zreader *z, const char *zprog)
     return false;
 }
 
-void zreader_fini(struct zreader *z)
-{
-    z->fini(z);
-}
-
 #ifdef ZREADER_MAIN
 #include <stdio.h>
 #include <unistd.h>
