@@ -98,8 +98,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #define RPMTAG_FILEMODES         1030
 #define RPMTAG_FILEMTIMES        1034
 #define RPMTAG_FILEFLAGS         1037
-#define RPMTAG_FILEUSERNAME      1039
-#define RPMTAG_FILEGROUPNAME     1040
 #define RPMTAG_SOURCERPM         1044
 #define RPMTAG_FILEDEVICES       1095
 #define RPMTAG_FILEINODES        1096
@@ -118,8 +116,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	struct tabent filemodes;
 	struct tabent filemtimes;
 	struct tabent fileflags;
-	struct tabent fileusername;
-	struct tabent filegroupname;
 	struct tabent sourcerpm;
 	struct tabent filedevices;
 	struct tabent fileinodes;
@@ -136,8 +132,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	.filemodes         = { RPMTAG_FILEMODES, RPM_INT16_TYPE },
 	.filemtimes        = { RPMTAG_FILEMTIMES, RPM_INT32_TYPE },
 	.fileflags         = { RPMTAG_FILEFLAGS, RPM_INT32_TYPE },
-	.fileusername      = { RPMTAG_FILEUSERNAME, RPM_STRING_ARRAY_TYPE },
-	.filegroupname     = { RPMTAG_FILEGROUPNAME, RPM_STRING_ARRAY_TYPE },
 	.sourcerpm         = { RPMTAG_SOURCERPM, RPM_STRING_TYPE },
 	.filedevices       = { RPMTAG_FILEDEVICES, RPM_INT32_TYPE },
 	.fileinodes        = { RPMTAG_FILEINODES, RPM_INT32_TYPE },
@@ -208,12 +202,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     if (!fileCount)
 	goto compressor;
 
-    // User/group IDs must match file count.
-    if (tab.fileusername.cnt != fileCount)
-	return ERR("bad fileusername");
-    if (tab.filegroupname.cnt != fileCount)
-	return ERR("bad filegroupname");
-
     // If it's LONGFILESIZES, we're about to load more tags.
     if (tab.longfilesizes.cnt) {
 	if (tab.longfilesizes.cnt != fileCount || tab.filesizes.cnt)
@@ -256,8 +244,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #define tabSize(x) (tab.x.nextoff - tab.x.off)
     if (tab.oldfilenames.cnt)
 	alloc += tabSize(oldfilenames);
-    alloc += tabSize(fileusername);
-    alloc += tabSize(filegroupname);
     // We have a few stages which need temporary storage:
     // - read filedevices and fileinodes to detect hardinks and set fx->ino
     // - remap dirindexes to direct offsets into strtab
@@ -376,30 +362,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	fflags = ntohl(fflags);
 	ffi[i].fflags = fflags;
     }
-
-#define TakeIDs(m_tab, m_fi)				\
-    do {						\
-	char *needpos = strpos;				\
-	te = &tab.m_tab;				\
-	TakeS(te);					\
-	memset(strend - 1, '\0', 4);			\
-	for (unsigned i = 0; i < fileCount; i++) {	\
-	    if (strpos == strend || *strpos == '\0')	\
-		return ERR("bad " #m_tab);		\
-	    if (memcmp(strpos, "root", 5) == 0) {	\
-		ffi[i].m_fi = 0;			\
-		strpos += 5;				\
-		continue;				\
-	    }						\
-	    ffi[i].m_fi = strpos - h->strtab;		\
-	    strpos += strlen(strpos) + 1;		\
-	    needpos = strpos;				\
-	}						\
-	strpos = needpos;				\
-    } while (0)
-
-    TakeIDs(fileusername, uid);
-    TakeIDs(filegroupname, gid);
 
     // Hardlink detection pass.
     if (ffx) {

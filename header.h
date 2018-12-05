@@ -28,7 +28,7 @@ struct header {
     union { bool rpm; } src;
     union { bool fnames; } old;
     char zprog[14];
-    // Basic info, maps fname->(mode,fflags,uid,gid) + dup detector.
+    // Basic info, maps fname -> (mode,fflags) + dup detector.
     struct fi {
 	unsigned bn;
 	unsigned dn;
@@ -37,8 +37,6 @@ struct header {
 	unsigned fflags;
 	unsigned short mode;
 	unsigned short seen;
-	unsigned uid;
-	unsigned gid;
     } *ffi;
     // Additional info for large files / excluded cpio entries.
     struct fx {
@@ -51,7 +49,7 @@ struct header {
     char *strtab;
 };
 
-static_assert(sizeof(struct fi) == 28, "struct fi tightly packed");
+static_assert(sizeof(struct fi) == 20, "struct fi tightly packed");
 static_assert(sizeof(struct fx) == 16, "struct fx tightly packed");
 
 bool header_read(struct header *h, struct fda *fda, const char **err);
