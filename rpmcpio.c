@@ -36,7 +36,7 @@ struct rpmcpio {
     unsigned long long endpos; // end data pos
     struct { unsigned ino, mode, nlink, cnt; } hard;
     struct fda fda;
-    char fdabuf[NREADA];
+    char fdabuf[BUFSIZA];
     struct header h;
     struct zreader z;
     struct cpioent ent;
