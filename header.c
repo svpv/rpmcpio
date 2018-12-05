@@ -191,8 +191,10 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	return ERR("file count mismatch");
 
     // File info, to be malloc'd.
-    struct fi *ffi = h->ffi = NULL;
-    struct fx *ffx = h->ffx = NULL;
+    struct fi *ffi = NULL;
+    struct fx *ffx = NULL;
+    // We further need some temporary space.
+    void *tmp = NULL;
 
     // Current offset within the header's data store.
     unsigned doff = 0;
@@ -202,7 +204,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     if (!fileCount)
 	goto compressor;
 
-    // If it's LONGFILESIZES, we're about to load more tags.
+    // If it's LONGFILESIZES, also load mtimes (otherwise available from cpio).
     if (tab.longfilesizes.cnt) {
 	if (tab.longfilesizes.cnt != fileCount || tab.filesizes.cnt)
 	    return ERR("bad longfilesizes");
@@ -211,12 +213,12 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     }
 
     // Either OLDFILENAMES or BASENAMES+DIRNAMES+DIRINDEXES.
-    if (tab.oldfilenames.cnt == fileCount) {
-	if (tab.basenames.cnt)
+    if (tab.oldfilenames.cnt) {
+	if (tab.oldfilenames.cnt != fileCount || tab.basenames.cnt)
 	    return ERR("bad filenames");
     }
     else {
-	if (tab.basenames.cnt != fileCount || tab.oldfilenames.cnt)
+	if (tab.basenames.cnt != fileCount)
 	    return ERR("bad filenames");
 	// Will directories be loaded?
 	if (!h->src.rpm) {
@@ -225,7 +227,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	    // Suppose the dirnames count is too big, so what?  Couldn't it be
 	    // that some dirnames are unused?  Well, this can induce integer
 	    // overflow with malloc.  (And the package is probably corrupt.)
-	    if (tab.dirnames.cnt > tab.basenames.cnt)
+	    if (tab.dirnames.cnt > fileCount)
 		return ERR("bad dirnames");
 	    // Whether dirnames count is too small is determined at the time
 	    // of unpacking dirindexes.
@@ -233,33 +235,24 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     }
     h->old.fnames = tab.oldfilenames.cnt;
 
-    // Assume each file takes at least 16 bytes in the data store.
-    // This is mostly to avoid integer overflow with malloc.
+    // Assume each file takes at least 16 bytes in the data store.  With 256M
+    // limit for hdr.dl, this means that only up to 16M files can be packaged.
+    // The check is mostly to avoid integer overflow with malloc.
     if (h->fileCount > (16<<20))
 	return ERR("bad file count");
-    // Allocate in a single chunk.
+    // Allocate ffi + ffx + strtab in a single chunk.
     size_t alloc = fileCount * sizeof(*ffi);
     if (tab.longfilesizes.cnt)
 	alloc += fileCount * sizeof(*ffx);
 #define tabSize(x) (tab.x.nextoff - tab.x.off)
     if (tab.oldfilenames.cnt)
 	alloc += tabSize(oldfilenames);
-    // We have a few stages which need temporary storage:
-    // - read filedevices and fileinodes to detect hardinks and set fx->ino
-    // - remap dirindexes to direct offsets into strtab
-    // Trying to replay the events and estimate the usage precisely.
-    size_t morealloc = 0;
-#define peakAlloc(s) morealloc = (s) > morealloc ? (s) : morealloc
-    if (tab.longfilesizes.cnt)
-	peakAlloc(fileCount * 8 + 4); // (ino,at) + ino sentinel
     if (tab.basenames.cnt) {
-	size_t s = tabSize(basenames);
+	alloc += tabSize(basenames);
 	if (!h->src.rpm)
-	    s += tabSize(dirnames) + fileCount * 6;
-	peakAlloc(s);
+	    alloc += tabSize(dirnames);
     }
-    alloc += morealloc + 4; // strtab[0] + align to 4 / padding for IDs
-    ffi = h->ffi = malloc(alloc);
+    ffi = h->ffi = malloc(alloc + /* strtab[0] */ 1);
     if (!ffi)
 	return ERR("malloc failed");
     if (tab.longfilesizes.cnt) {
@@ -269,15 +262,30 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     else
 	h->strtab = (void *) (ffi + fileCount);
 
+#undef ERR
+#define ERR(s) (free(ffi), *err = s, false)
+
+    // Temporary space, to load arrays with a single reada call.
+    alloc = fileCount * 4;
+    // ffx additionally neeeds (ino,at) + ino sentinel.
+    if (ffx)
+	alloc += fileCount * 8 + 4;
+    // otherwise dirname unpacking needs two integers per dir.
+    else if (!h->src.rpm && alloc < tab.dirnames.cnt * 8)
+	alloc = tab.dirnames.cnt * 8;
+    tmp = malloc(alloc);
+    if (!tmp)
+	return ERR("malloc failed");
+
+#undef ERR
+#define ERR(s) (free(ffi), free(tmp), *err = s, false)
+
     // Fill the strtab with basenames and dirnames.
     char *strpos = h->strtab;
-    // E.g. uid=0 means "root".
+    // Zero offset reserved for null / empty string.
     *strpos++ = '\0';
     // The end of a segment loaded into the strtab.
     char *strend;
-
-#undef ERR
-#define ERR(s) (free(ffi), *err = s, false)
 
 #define SkipTo(off)					\
     do {						\
@@ -288,17 +296,14 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	doff += skip;					\
     } while (0)
 
-#define Taking(te, cnt, w, s)				\
+#define TakeArray(te, a, cnt, s)			\
     do {						\
-	if (te->nextoff - te->off < cnt * sizeof w)	\
+	size_t takeBytes = cnt * sizeof *a;		\
+	if (te->nextoff - te->off < takeBytes)		\
 	    return ERR("bad " s);			\
-	doff += cnt * sizeof w;				\
-    } while (0)
-
-#define Read1(w)					\
-    do {						\
-	if (reada(fda, &w, sizeof w) != sizeof w)	\
+	if (reada(fda, a, takeBytes) != takeBytes)	\
 	    return ERR("cannot read header data");	\
+	doff += takeBytes;				\
     } while (0)
 
     // Take a string or a string array into the strtab.
@@ -333,54 +338,53 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 
     te = &tab.filemodes;
     SkipTo(te->off);
-    unsigned short fmode;
-    Taking(te, fileCount, fmode, "filemodes");
+    unsigned short *fmodes = tmp;
+    TakeArray(te, fmodes, fileCount, "filemodes");
     for (unsigned i = 0; i < fileCount; i++) {
-	Read1(fmode);
-	ffi[i].mode = ntohs(fmode);
-	// Zero out fi->seen with the first unconditional field.
+	ffi[i].mode = ntohs(fmodes[i]);
+	// As filemodes is the first field we load unconditionally,
+	// initialize some other fields that need to be initialized.
 	ffi[i].seen = false;
     }
 
     if (ffx) {
 	te = &tab.filemtimes;
 	SkipTo(te->off);
-	unsigned fmtime;
-	Taking(te, fileCount, fmtime, "filemtimes");
-	for (unsigned i = 0; i < fileCount; i++) {
-	    Read1(fmtime);
-	    ffx[i].mtime = ntohl(fmtime);
-	}
+	unsigned *fmtimes = tmp;
+	TakeArray(te, fmtimes, fileCount, "filemtimes");
+	for (unsigned i = 0; i < fileCount; i++)
+	    ffx[i].mtime = ntohl(fmtimes[i]);
     }
 
     te = &tab.fileflags;
     SkipTo(te->off);
-    unsigned fflags;
-    Taking(te, fileCount, fflags, "fileflags");
-    for (unsigned i = 0; i < fileCount; i++) {
-	Read1(fflags);
-	fflags = ntohl(fflags);
-	ffi[i].fflags = fflags;
-    }
+    unsigned *fflags = tmp;
+    TakeArray(te, fflags, fileCount, "fileflags");
+    for (unsigned i = 0; i < fileCount; i++)
+	ffi[i].fflags = ntohl(fflags[i]);
 
-    // Hardlink detection pass.
+    // Hardlink detection pass.  With longfilesizes, cpio provides no stat
+    // information, and the rpm header does not provide nlink; nlink can only
+    // be deduced via grouping files by ino.
     if (ffx) {
+	te = &tab.fileinodes;
+	SkipTo(te->off);
+	unsigned *finodes = tmp;
+	TakeArray(te, finodes, fileCount, "fileinodes");
+
 	struct hi { unsigned ino, at; }; // hardlink info
-	struct hi *hi = (void *) (((uintptr_t) strpos + 3) & ~3);
+	struct hi *hi = (void *)(finodes + fileCount);
 	unsigned nhi = 0;
 
 	// If all the inodes are sorted (less than or equal).
+	// Modern rpm renumbers inodes, so this can save sorting.
 	bool le = true;
 	// If some inodes are equal (only makes sense if sorted).
 	bool eq = false;
 
-	te = &tab.fileinodes;
-	SkipTo(te->off);
-	unsigned ino, lastino;
-	Taking(te, fileCount, ino, "fileinodes");
+	unsigned lastino;
 	for (unsigned i = 0; i < fileCount; i++) {
-	    Read1(ino);
-	    ino = ntohl(ino);
+	    unsigned ino = ntohl(finodes[i]);
 	    // Store the inode, and assume that nlink is 1.
 	    ffx[i].ino = ino;
 	    ffx[i].nlink = 1;
@@ -436,11 +440,10 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     te = &tab.dirindexes;
     if (te->cnt && !h->src.rpm) {
 	SkipTo(te->off);
-	unsigned dindex;
-	Taking(te, fileCount, dindex, "dirindexes");
+	unsigned *dindexes = tmp;
+	TakeArray(te, dindexes, fileCount, "dirindexes");
 	for (unsigned i = 0; i < fileCount; i++) {
-	    Read1(dindex);
-	    dindex = ntohl(dindex);
+	    unsigned dindex = ntohl(dindexes[i]);
 	    if (dindex >= tab.dirnames.cnt)
 		return ERR("bad dirindexes");
 	    // Place raw di into dn, will update in just a moment.
@@ -469,8 +472,8 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	SkipTo(te->off);
 	TakeS(te);
 	// Unpack dirnames' offsets and lengths into temporary arrays.
-	unsigned *dn = (void *) (((uintptr_t) strend + 3) & ~3);
-	unsigned short *dl = (void *) (dn + tab.dirnames.cnt);
+	unsigned *dn = tmp;
+	unsigned *dl = dn + tab.dirnames.cnt;
 	for (unsigned i = 0; i < tab.dirnames.cnt; i++) {
 	    if (strpos == strend)
 		return ERR("bad dirnames");
@@ -518,13 +521,12 @@ compressor:
     if (ffx) {
 	te = &tab.longfilesizes;
 	SkipTo(te->off);
-	unsigned long long longfsize;
-	Taking(te, fileCount, longfsize, "longfilesizes");
+	unsigned long long *longfsizes = tmp;
+	TakeArray(te, longfsizes, fileCount, "longfilesizes");
 	for (unsigned i = 0; i < fileCount; i++) {
-	    Read1(longfsize);
 	    if (S_ISLNK(ffi[i].mode))
 		continue; // already set to target length
-	    longfsize = be64toh(longfsize);
+	    unsigned long long longfsize = be64toh(longfsizes[i]);
 	    if (longfsize > 0xffffFFFFffffUL)
 		return ERR("bad longfilesizes");
 	    ffx[i].size = longfsize;
@@ -532,6 +534,7 @@ compressor:
     }
 
     SkipTo(hdr.dl);
+    free(tmp);
 
     h->prevFound = -1;
     return true;
