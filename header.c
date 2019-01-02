@@ -153,33 +153,46 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	    return ERR("cannot read pkg header");
 	unsigned tag = ntohl(e.tag);
 	unsigned off = ntohl(e.off);
-	if (tag <= lasttag)
+	// Validate the tag.
+	if (lasttag >= tag)
 	    return ERR("tags out of order");
 	lasttag = tag;
+	// Set the end position for the previous table entry.
 	if (nextoffte) {
+	    if (nextoffte->off >= off)
+		return ERR("offsets out of order");
 	    nextoffte->nextoff = off;
 	    nextoffte = NULL;
+	    // Mark the last byte relevenat for order checking.
+	    lastoff = off - 1;
 	}
+	// Run the merge.
 	while (te->tag < tag)
 	    te++;
 	if (te->tag > tag)
 	    continue;
+	// Validate the offset (only applies to the tags we're interested in,
+	// otherwise can break because of some special cases).
 	if (lastoff >= off)
 	    return ERR("offsets out of order");
 	lastoff = off;
+	// Validate other fields.
 	if (e.cnt == 0)
 	    return ERR("zero tag count");
 	unsigned type = ntohl(e.type);
 	if (type != te->type)
 	    return ERR("bad tag type");
+	// Okay, fill in the table entry.
 	te->cnt = ntohl(e.cnt);
 	te->off = off;
 	nextoffte = te; // set te->nextoff on the next iteration
     }
-    if (nextoffte && nextoffte != &tab.nil) {
-	if (nextoffte->off >= hdr.dl)
-	    return ERR("offsets out of order");
-	nextoffte->off = hdr.dl;
+    if (hdr.dl && lastoff >= hdr.dl) // do we accept hdr.dl==0?
+	return ERR("offsets out of bounds");
+    if (nextoffte) {
+	if (nextoffte == &tab.nil)
+	    return ERR("bad tag type");
+	nextoffte->nextoff = hdr.dl;
 	nextoffte = NULL;
     }
 
