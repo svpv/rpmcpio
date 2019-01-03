@@ -99,7 +99,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #define RPMTAG_FILEMTIMES        1034
 #define RPMTAG_FILEFLAGS         1037
 #define RPMTAG_SOURCERPM         1044
-#define RPMTAG_FILEDEVICES       1095
 #define RPMTAG_FILEINODES        1096
 #define RPMTAG_DIRINDEXES        1116
 #define RPMTAG_BASENAMES         1117
@@ -117,7 +116,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	struct tabent filemtimes;
 	struct tabent fileflags;
 	struct tabent sourcerpm;
-	struct tabent filedevices;
 	struct tabent fileinodes;
 	struct tabent dirindexes;
 	struct tabent basenames;
@@ -133,7 +131,6 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	.filemtimes        = { RPMTAG_FILEMTIMES, RPM_INT32_TYPE },
 	.fileflags         = { RPMTAG_FILEFLAGS, RPM_INT32_TYPE },
 	.sourcerpm         = { RPMTAG_SOURCERPM, RPM_STRING_TYPE },
-	.filedevices       = { RPMTAG_FILEDEVICES, RPM_INT32_TYPE },
 	.fileinodes        = { RPMTAG_FILEINODES, RPM_INT32_TYPE },
 	.dirindexes        = { RPMTAG_DIRINDEXES, RPM_INT32_TYPE },
 	.basenames         = { RPMTAG_BASENAMES, RPM_STRING_ARRAY_TYPE },
