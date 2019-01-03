@@ -22,12 +22,9 @@
 
 #pragma GCC visibility push(hidden)
 
+// To provide intelligent access to the cpio archive, the code first scans
+// the rpm header and fills in the following table:
 struct header {
-    unsigned fileCount;
-    unsigned prevFound;
-    union { bool rpm; } src;
-    union { bool fnames; } old;
-    char zprog[14];
     // Basic info, maps fname -> (mode,fflags) + dup detector.
     struct fi {
 	unsigned bn;
@@ -36,7 +33,8 @@ struct header {
 	unsigned short dlen;
 	unsigned fflags;
 	unsigned short mode;
-	unsigned short seen;
+	bool seen;
+	bool pad;
     } *ffi;
     // Additional info for large files / excluded cpio entries.
     struct fx {
@@ -47,6 +45,15 @@ struct header {
     } *ffx;
     // Strings point here, e.g. strlen(strtab + dn) == dlen.
     char *strtab;
+    // Number of ffi[] entries / packaged files according to the header.
+    unsigned fileCount;
+    // Speeds up header_find().
+    unsigned prevFound;
+    // Flags, spelled in a funny way.
+    union { bool rpm; } src;
+    union { bool fnames; } old;
+    // The payload compressor.
+    char zprog[14];
 };
 
 static_assert(sizeof(struct fi) == 20, "struct fi tightly packed");

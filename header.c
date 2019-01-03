@@ -85,7 +85,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     hdr.il = ntohl(hdr.il);
     hdr.dl = ntohl(hdr.dl);
     if (hdr.il > (64<<10) || hdr.dl > (256<<20))
-	return ERR("bad sig header size");
+	return ERR("bad pkg header size");
 
 #define RPM_INT16_TYPE        3
 #define RPM_INT32_TYPE        4
@@ -291,7 +291,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #undef ERR
 #define ERR(s) (free(ffi), free(tmp), *err = s, false)
 
-    // Fill the strtab with basenames and dirnames.
+    // Gonna fill the strtab with basenames and dirnames.
     char *strpos = h->strtab;
     // Zero offset reserved for null / empty string.
     *strpos++ = '\0';
@@ -582,28 +582,27 @@ unsigned header_find(struct header *h, const char *fname, size_t flen)
     // (the exception being hardlinks), we expect the immediate hit.
     size_t at = ++h->prevFound;
     if (at >= h->fileCount) {
-	assert(h->fileCount > 0);
+	assert(h->fileCount > 0); // h->fileCount is 0 => don't call me
 	at = (lo + hi) / 2;
     }
 
     // If no dirnames need to be considered, run a much simplified version
     // of the binary search loop (which also delivers better performance).
-    if (h->src.rpm || h->old.fnames) {
-	while (1) {
-	    struct fi *fi = &h->ffi[at];
-	    int cmp = strlencmp(fname, flen, h->strtab + fi->bn, fi->blen);
-	    if (cmp == 0) {
-		h->prevFound = at;
-		return at;
-	    }
-	    if (cmp < 0)
-		hi = at;
-	    else
-		lo = at + 1;
-	    if (lo >= hi)
-		return -1;
-	    at = (lo + hi) / 2;
+    if (h->src.rpm || h->old.fnames)
+    while (1) {
+	struct fi *fi = &h->ffi[at];
+	int cmp = strlencmp(fname, flen, h->strtab + fi->bn, fi->blen);
+	if (cmp == 0) {
+	    h->prevFound = at;
+	    return at;
 	}
+	if (cmp < 0)
+	    hi = at;
+	else
+	    lo = at + 1;
+	if (lo >= hi)
+	    return -1;
+	at = (lo + hi) / 2;
     }
 
     // Digest fname.
@@ -640,7 +639,7 @@ unsigned header_find(struct header *h, const char *fname, size_t flen)
 	}
 	else if (dlen < fi->dlen) {
 	    // dn is shorter than fi->dn, the result of comparsion should only
-	    // depend on [dn,bn] and fi->dn, but not on fi->bn.  Thus dircmp
+	    // depend on (dn,bn) and fi->dn, but not on fi->bn.  Thus dircmp
 	    // can cache a full comparsion, not just the dirname comparison.
 	    if (fi->dn != lastdn) {
 		dircmp = memcmp(dn, h->strtab + fi->dn, dlen);
