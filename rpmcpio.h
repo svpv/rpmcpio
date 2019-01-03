@@ -1,4 +1,4 @@
-// Copyright (c) 2016, 2018 Alexey Tourbin
+// Copyright (c) 2016, 2018, 2019 Alexey Tourbin
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,7 +19,12 @@
 // SOFTWARE.
 
 #pragma once
-#include <stdbool.h>
+#ifndef __cplusplus
+#include <stddef.h>
+#else
+#include <cstddef>
+extern "C" {
+#endif
 
 // Open the package payload to process its file data.
 // The API is deliberately simplified for automated testing and the like:
@@ -28,46 +33,62 @@
 // or to AT_FDCWD.  The total file count, obtained from the package header,
 // is returned via nent; the actual number of cpio entries can be fewer,
 // because of %ghost files; the handle is created even if nent=0.
-// If all=true is requested, unpackaged files, its entries restored from
-// the package header, will be traversed after the regular cpio entries.
-struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
-			     unsigned *nent, bool all) __attribute__((nonnull(2)));
+struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname, unsigned *nent);
+void rpmcpio_close(struct rpmcpio *cpio);
 
-// The handle can be reused for another package.  Dies on error.
-void rpmcpio_reopen(struct rpmcpio *cpio, int dirfd, const char *rpmfname,
-		    unsigned *nent, bool all) __attribute__((nonnull(1,3)));
-
-void rpmcpio_close(struct rpmcpio *cpio) __attribute__((nonnull(1)));
-
+// Archive entries are exposed through this structure:
 struct cpioent {
+    // Each file in the archive is identified by its inode number.
+    // Together with nlink, ino can be used to track hardlinks.
+    // Hardlinked files are grouped together, and marked with the same ino
+    // and the same nlink > 1.  All but the last file have size set to 0,
+    // i.e. file data comes with the last file in a hardlink set.
+    // Hence one simple strategy to deal with hardlinks is to skip files
+    // whose size is 0.  The library performs many additional checks on
+    // hardlink sets, such as that only regular files can be hardlinks,
+    // and that the sets are complete.
     unsigned ino;
-    unsigned mode;
-    unsigned uid;
-    unsigned gid;
-    unsigned nlink;
+    unsigned short nlink;
+    // File type and permissions.
+    unsigned short mode;
+    // Last modification time.
     unsigned mtime;
-    unsigned long long size;
-    unsigned dev_major, dev_minor;
-    unsigned rdev_major, rdev_minor;
-    unsigned fnamelen; // strlen(fname) < PATH_MAX
-    unsigned fflags; // RPMFILE_CONFIG | RPMFILE_DOC | RPMFILE_GHOST ...
-    unsigned no; // this entry's number, no >= 0 && no < nent
-    // If the entry comes from cpio, packaged is set to true.
-    // Otherwise the entry is restored from the header,
-    // most probably because it's a %ghost file.
-    bool packaged;
-    char pad[3];
-    char fname[]; // PATH_MAX = 4096, including trailing '\0'
+    // File flags from the rpm header, such as RPMFILE_CONFIG | RPMFILE_DOC.
+    unsigned fflags;
+    // File size.
+    union {
+	unsigned long long size;
+	// For symlinks, this is also the length of the link target,
+	// not including the trailing '\0'.
+	unsigned long long linklen;
+    };
+    // Filename length: fnamelen = strlen(fname) < PATH_MAX = 4096.
+    unsigned fnamelen;
+    // The leading dot in "./filename" can be stripped by reading it here:
+    char pad[4];
+    // The filename of the entry, null-terminated.  Source packages have
+    // basename-only filenames with no slashes in them.  Binary packages have
+    // absolute pathnames which start with '/'.
+    char fname[];
 };
 
+// Iterate the archive entries, until NULL is returned.  Dies on error.
+// Returns a pointer to an internal (read-only) cpioent structure.  The call
+// can be proceeded with reading file data, in full or in part, or with the
+// next rpmcpio_next call (the remaining data will be skipped as necessary).
 const struct cpioent *rpmcpio_next(struct rpmcpio *cpio);
 
 // Read file data.  The entry must be S_ISREG(ent->mode).  Dies on error.
+// Piecemeal reads are okay, no need to read the data in one fell swoop.
 size_t rpmcpio_read(struct rpmcpio *cpio, void *buf, size_t size);
 
 // The rules for reading the target of a symbolic link.  The entry must be
-// S_ISLNK(ent->mode).  The string length of the target, without the trailing
-// '\0', is ent->size.  The caller must provide a buffer of at least size + 1
+// S_ISLNK(ent->mode).  The strlen of the target, without the trailing '\0',
+// is ent->linklen.  The caller must provide a buffer of at least linklen + 1
 // bytes, or PATH_MAX.  The string will be null-terminated, and its length
 // returned.  There will be no embedded null bytes in the string.
-size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t size);
+size_t rpmcpio_readlink(struct rpmcpio *cpio, char *buf);
+
+#ifdef __cplusplus
+}
+#endif
