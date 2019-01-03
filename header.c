@@ -234,16 +234,15 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 	if (tab.basenames.cnt != fileCount)
 	    return ERR("bad filenames");
 	// Will directories be loaded?
-	if (!h->src.rpm) {
+#define LoadDirs (tab.basenames.cnt && !h->src.rpm)
+	if (LoadDirs) {
 	    if (tab.dirindexes.cnt != fileCount)
 		return ERR("bad dirindexes");
 	    // Suppose the dirnames count is too big, so what?  Couldn't it be
 	    // that some dirnames are unused?  Well, this can induce integer
 	    // overflow with malloc.  (And the package is probably corrupt.)
-	    if (tab.dirnames.cnt > fileCount)
+	    if (tab.dirnames.cnt == 0 || tab.dirnames.cnt > fileCount)
 		return ERR("bad dirnames");
-	    // Whether dirnames count is too small is determined at the time
-	    // of unpacking dirindexes.
 	}
     }
     h->old.fnames = tab.oldfilenames.cnt;
@@ -260,11 +259,10 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
 #define tabSize(x) (tab.x.nextoff - tab.x.off)
     if (tab.oldfilenames.cnt)
 	alloc += tabSize(oldfilenames);
-    if (tab.basenames.cnt) {
+    if (tab.basenames.cnt)
 	alloc += tabSize(basenames);
-	if (!h->src.rpm)
-	    alloc += tabSize(dirnames);
-    }
+    if (LoadDirs)
+	alloc += tabSize(dirnames);
     ffi = h->ffi = malloc(alloc + /* strtab[0] */ 1);
     if (!ffi)
 	return ERR("malloc failed");
@@ -284,7 +282,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     if (ffx)
 	alloc += fileCount * 8 + 4;
     // otherwise dirname unpacking needs two integers per dir.
-    else if (!h->src.rpm && alloc < tab.dirnames.cnt * 8)
+    else if (LoadDirs && alloc < tab.dirnames.cnt * 8)
 	alloc = tab.dirnames.cnt * 8;
     tmp = malloc(alloc);
     if (!tmp)
@@ -451,7 +449,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     }
 
     te = &tab.dirindexes;
-    if (te->cnt && !h->src.rpm) {
+    if (LoadDirs) {
 	SkipTo(te->off);
 	unsigned *dindexes = tmp;
 	TakeArray(te, dindexes, fileCount, "dirindexes");
@@ -481,7 +479,7 @@ bool header_read(struct header *h, struct fda *fda, const char **err)
     }
 
     te = &tab.dirnames;
-    if (te->cnt && !h->src.rpm) {
+    if (LoadDirs) {
 	SkipTo(te->off);
 	TakeS(te);
 	// Unpack dirnames' offsets and lengths into temporary arrays.
