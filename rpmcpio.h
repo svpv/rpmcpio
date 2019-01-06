@@ -64,12 +64,10 @@ struct cpioent {
     };
     // Filename length: fnamelen = strlen(fname) < PATH_MAX = 4096.
     unsigned fnamelen;
-    // The leading dot in "./filename" can be stripped by reading it here:
-    char pad[4];
     // The filename of the entry, null-terminated.  Source packages have
     // basename-only filenames with no slashes in them.  Binary packages have
     // absolute pathnames which start with '/'.
-    char fname[];
+    const char *fname;
 };
 
 // Iterate the archive entries, until NULL is returned.  Dies on error.

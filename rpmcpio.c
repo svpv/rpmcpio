@@ -40,14 +40,11 @@ struct rpmcpio {
     struct header h;
     struct zreader z;
     struct cpioent ent;
-    char fname[4096];
+    char buf[8192];
     char rpmbname[];
 };
 
-static_assert(sizeof(struct cpioent) == 64, "nice cpioent size");
-
-struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
-			     unsigned *nent, bool all)
+struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname, unsigned *nent)
 {
     const char *rpmbname = xbasename(rpmfname);
     int fd = openat(dirfd, rpmfname, O_RDONLY);
@@ -70,12 +67,21 @@ struct rpmcpio *rpmcpio_open(int dirfd, const char *rpmfname,
 	die("%s: cannot initialize %s decompressor", rpmbname, cpio->h.zprog);
 
     cpio->curpos = cpio->endpos = 0;
-    cpio->ent.no = -1;
     cpio->hard.nlink = cpio->hard.cnt = 0;
+    cpio->ent.mode = 0; // S_ISREG will fail
 
     return cpio;
 }
 
+void rpmcpio_close(struct rpmcpio *cpio)
+{
+    zreader_fini(&cpio->z);
+    header_freedata(&cpio->h);
+    close(cpio->fda.fd);
+    free(cpio);
+}
+
+// Read the raw uncompressed stream.
 static inline size_t zread(struct rpmcpio *cpio, void *buf, size_t n)
 {
     size_t ret = zreader_read(&cpio->z, &cpio->fda, buf, n);
@@ -85,20 +91,6 @@ static inline size_t zread(struct rpmcpio *cpio, void *buf, size_t n)
 	die("%s: %s decompression failed", cpio->rpmbname, cpio->h.zprog);
     }
     return ret;
-}
-
-static void rpmcpio_skip(struct rpmcpio *cpio, int n)
-{
-    assert(n > 0);
-    assert(cpio->ent.no >= 0);
-    char buf[BUFSIZ];
-    do {
-	int m = (n > BUFSIZ) ? BUFSIZ : n;
-	if (zread(cpio, buf, m) != m)
-	    die("%s: cannot skip cpio bytes", cpio->rpmbname);
-	n -= m;
-    }
-    while (n > 0);
 }
 
 static const signed char hex[256] = {
@@ -142,91 +134,163 @@ static inline unsigned hex1(const char *s, const char *rpmbname)
     return hi << 16 | lo;
 }
 
-// Convert 6 hex fields.
-static void hex6(const char s[6*8], unsigned v[6], const char *rpmbname)
+// Got an excluded entry, fill cpio->ent from the header.
+static void ent_0X(struct rpmcpio *cpio, unsigned ix)
 {
-    for (int i = 0; i < 6; i++)
-	v[i] = hex1(s + 8 * i, rpmbname);
+    struct header *h = &cpio->h;
+    if (ix >= h->fileCount)
+	die("%s: bad cpio entry index", cpio->rpmbname);
+    struct fi *fi = &h->ffi[ix];
+    struct fx *fx = &h->ffx[ix];
+    if (fi->seen)
+	die("%s: %s%s: file listed twice", cpio->rpmbname,
+	    h->src.rpm || h->old.fnames ? "" : h->strtab + fi->dn,
+	    h->strtab + fi->bn);
+    fi->seen = true;
+    struct cpioent *ent = &cpio->ent;
+    ent->mode = fi->mode;
+    ent->fflags = fi->fflags;
+    ent->ino = fx->ino;
+    ent->nlink = fx->nlink;
+    ent->mtime = fx->mtime;
+    ent->size = fx->size;
+    // filename
+    if (h->src.rpm || h->old.fnames) {
+	if (fi->blen == 0 || fi->blen >= (h->src.rpm ? 256 : 4096))
+	    die("%s: bad filename length", cpio->rpmbname);
+	ent->fnamelen = fi->blen;
+	ent->fname = h->strtab + fi->bn;
+    }
+    else {
+	ent->fnamelen = fi->dlen + fi->blen;
+	if (ent->fnamelen >= 4096)
+	    die("%s: bad filename length", cpio->rpmbname);
+	memcpy(cpio->buf,            h->strtab + fi->dn, fi->dlen);
+	memcpy(cpio->buf + fi->dlen, h->strtab + fi->bn, fi->blen + 1);
+	ent->fname = cpio->buf;
+    }
+}
+
+// Parse a regular cpio entry, then read filename.
+static bool ent_01(struct rpmcpio *cpio, const char buf[110])
+{
+    if (memcmp(buf, "070701", 6) != 0)
+	die("%s: bad cpio header magic", cpio->rpmbname);
+    unsigned v[13];
+    for (int i = 0; i < 13; i++)
+	v[i] = hex1(buf + 6 + 8 * i, cpio->rpmbname);
+    struct cpioent *ent = &cpio->ent;
+    ent->ino = v[0];
+    if (v[1] > 0xffff) die("%s: bad cpio mode", cpio->rpmbname);
+    if (v[4] > 0xffff) die("%s: bad cpio nlink", cpio->rpmbname);
+    ent->mode = v[1];
+    // v[2]: uid, v[3]: gid
+    ent->nlink = v[4];
+    ent->mtime = v[5];
+    ent->size = v[6];
+    // v[7]: dev_major, v[8]: dev_minor, v[9]: rdev_major, v[10]: rdev_minor
+    ent->fnamelen = v[11] - 1;
+    // v[12]: checksum
+
+    // The filename may start with "./", or may lack the leading '/'.
+    struct header *h = &cpio->h;
+    if (ent->fnamelen == 0 || ent->fnamelen >= (h->src.rpm ? 256 + 2 : 4096 + 1))
+	die("%s: bad filename length", cpio->rpmbname);
+    // cpio magic is 6 bytes, but filename is padded to a multiple of 4 bytes.
+    // So we're going to read at least 2 bytes (minlen=1 + the null byte),
+    // and the rest is rounded up to a multiple of 4.
+    unsigned fnamesize = ent->fnamelen + 1;
+    fnamesize = 2 + ((fnamesize - 2 + 3) & ~3);
+    char *fname = cpio->buf + !h->src.rpm;
+    if (zread(cpio, fname, fnamesize) != fnamesize)
+	die("%s: cannot read cpio filename", cpio->rpmbname);
+    cpio->curpos += fnamesize;
+    // The filename must be null-terminated.
+    if (fname[ent->fnamelen])
+	die("%s: bad cpio filename", cpio->rpmbname);
+    // Reached the trailer entry?
+    if (memcmp(fname, "TRAILER!!!", ent->fnamelen) == 0)
+	return true;
+    // No embedded null bytes in the filename.
+    if (strlen(fname) != ent->fnamelen)
+	die("%s: bad cpio filename", cpio->rpmbname);
+    // Adjust the prefix.
+    if (memcmp(fname, "./", 2) == 0)
+	fname++, ent->fnamelen--;
+    if (fname[0] == '/')
+	fname += h->src.rpm, ent->fnamelen -= h->src.rpm;
+    else if (!h->src.rpm)
+	*--fname = '/', ent->fnamelen++;
+    // Recheck the length.
+    if (ent->fnamelen == 0 || ent->fnamelen >= (h->src.rpm ? 256 : 4096))
+	die("%s: bad filename length", cpio->rpmbname);
+    ent->fname = fname;
+
+    // Now match with the header.
+    unsigned ix = header_find(&cpio->h, ent->fname, ent->fnamelen);
+    if (ix == -1)
+	die("%s: %s: file not in rpm header", cpio->rpmbname, ent->fname);
+    struct fi *fi = &h->ffi[ix];
+    if (fi->seen)
+	die("%s: %s: file listed twice", cpio->rpmbname, ent->fname);
+    fi->seen = true;
+    if (ent->mode != fi->mode)
+	die("%s: %s: bad file mode", cpio->rpmbname, ent->fname);
+    ent->fflags = fi->fflags;
+    return false;
 }
 
 const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 {
+    // Skip the remaining data and read the header.
+    // Try to combine it into a single zread call.
     unsigned long long nextpos = (cpio->endpos + 3) & ~3;
-    if (nextpos > cpio->curpos) {
-	rpmcpio_skip(cpio, nextpos - cpio->curpos);
-	cpio->curpos = nextpos;
+    unsigned long long skip = nextpos - cpio->curpos;
+    while (skip > sizeof cpio->buf - 110) {
+	size_t n = skip < sizeof cpio->buf ? skip : sizeof cpio->buf;
+	if (zread(cpio, cpio->buf, n) != n)
+	    die("%s: cannot skip cpio bytes", cpio->rpmbname);
+	skip -= n;
     }
-    char buf[110];
-    if (zread(cpio, buf, 110) != 110)
+    struct header *h = &cpio->h;
+    if (h->ffx) {
+	// Expecting "07070X" + file index + 2-byte padding.
+	if (zread(cpio, cpio->buf, skip + 16) != skip + 16)
+	    die("%s: cannot read cpio header", cpio->rpmbname);
+	if (memcmp(cpio->buf + skip, "07070X", 6) == 0) {
+	    cpio->curpos = nextpos + 16;
+	    ent_0X(cpio, hex1(cpio->buf + skip + 6, cpio->rpmbname));
+	    goto gotent;
+	}
+	// At least the trailer is still "070701", so read the rest.
+	if (zread(cpio, cpio->buf + skip + 16, 110 - 16) != 110 - 16)
+	    die("%s: cannot read cpio header", cpio->rpmbname);
+    }
+    else if (zread(cpio, cpio->buf, skip + 110) != skip + 110)
 	die("%s: cannot read cpio header", cpio->rpmbname);
-    if (memcmp(buf, "070701", 6) != 0)
-	die("%s: bad cpio header magic", cpio->rpmbname);
-    cpio->curpos += 110;
+    cpio->curpos = nextpos + 110;
 
-    struct cpioent *ent = &cpio->ent;
-
-    // Parse hex fields.
-    const char *s = buf + 6;
-    unsigned *v = &cpio->ent.ino;
-    hex6(s, v, cpio->rpmbname); // 32-bit fields before cpio->ent.size
-    hex6(s + 6 * 8, v + 7, cpio->rpmbname); // includes half of ent.size
-
-    // Grand type punning: assigns 64-bit ent.size from its 32-bit half.
-    cpio->ent.size = v[7];
-
-    // The checksum field is not part of cpioent, rpm always sets it to zero.
-    if (memcmp(s + 12 * 8, "0000" "0000", 8))
-	die("%s: non-zero cpio checksum", cpio->rpmbname);
-
-    cpio->ent.fflags = 0; // not yet supported
-    cpio->ent.packaged = true;
-    memset(cpio->ent.pad, 0, sizeof cpio->ent.pad);
-
-    // cpio magic is 6 bytes, but filename is padded to a multiple of four bytes
-    unsigned fnamesize = ((cpio->ent.fnamelen + 1) & ~3) + 2;
-    // At this stage, fnamelen includes '\0', and fname should start with "./".
-    // The leading dot will be stripped implicitly by copying to &fname[-1].
-    // src.rpm is the exeption: there should be no prefix, and nothing will be stripped.
-    bool dot = !cpio->h.src.rpm;
-    if (cpio->ent.fnamelen - dot > sizeof cpio->fname)
-	die("%s: cpio filename too long", cpio->rpmbname);
-    assert(fnamesize - dot <= sizeof cpio->fname);
-    // The shortest filename is "./\0", except for src.rpm,
-    // for which the shortest filename is "a\0".
-    if (cpio->ent.fnamelen < 3U - dot)
-	die("%s: cpio filename too short", cpio->rpmbname);
-    char *fnamedest = cpio->fname - dot;
-    if (zread(cpio, fnamedest, fnamesize) != fnamesize)
-	die("%s: cannot read cpio filename", cpio->rpmbname);
-
-    cpio->curpos += fnamesize;
-    cpio->endpos = cpio->curpos + cpio->ent.size;
-
-    if (memcmp(fnamedest, "TRAILER!!!", ent->fnamelen) == 0) {
+    bool eof = ent_01(cpio, cpio->buf + skip);
+    if (eof) {
+	// Check for trailing garbage.
+	char c;
+	if (zread(cpio, &c, 1) == 1)
+	    die("%s: trailing garbage", cpio->rpmbname);
 	// The trailer shouldn't happen in the middle of a hardlink set.
 	if (cpio->hard.cnt < cpio->hard.nlink)
 	    die("%s: %s: meager hardlink set", cpio->rpmbname, "TRAILER");
 	return NULL;
     }
 
-    if (++cpio->ent.no >= cpio->h.fileCount)
-	die("%s: %s: unexpected extra cpio entry", cpio->rpmbname, fnamedest);
-
-    bool has_prefix = memcmp(fnamedest, "./", 2) == 0;
-    if (dot != has_prefix)
-	die("%s: %s: invalid cpio filename", cpio->rpmbname, fnamedest);
-
-    cpio->ent.fnamelen -= 1 + dot;
-
-    // A valid ent->mode must fit into 16 bits.
-    if (cpio->ent.mode > 0xffff)
-	die("%s: %s: bad mode: 0%o", cpio->rpmbname, cpio->fname, cpio->ent.mode);
+gotent:;
+    struct cpioent *ent = &cpio->ent;
+    cpio->endpos = cpio->curpos + ent->size;
 
     // Finalizing an existing hardlink set.
     if (cpio->hard.cnt && cpio->hard.cnt == cpio->hard.nlink) {
 	// This new file is already not part of the preceding set.  Or is it?
 	if (ent->ino == cpio->hard.ino)
-	    die("%s: %s: obese hardlink set", cpio->rpmbname, cpio->fname);
+	    die("%s: %s: obese hardlink set", cpio->rpmbname, ent->fname);
 	cpio->hard.nlink = cpio->hard.cnt = 0;
     }
 
@@ -236,18 +300,18 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	if (cpio->hard.cnt == 0) {
 	    // E.g. ext4 has 16-bit i_links_count.
 	    if (ent->nlink > 0xffff)
-		die("%s: %s: bad nlink", cpio->rpmbname, cpio->fname);
+		die("%s: %s: bad nlink", cpio->rpmbname, ent->fname);
 	    cpio->hard.ino = ent->ino, cpio->hard.mode = ent->mode;
 	    cpio->hard.nlink = ent->nlink, cpio->hard.cnt = 1;
 	}
 	// Advancing in the existing hardlink set.
 	else {
 	    if (ent->ino != cpio->hard.ino)
-		die("%s: %s: meager hardlink set", cpio->rpmbname, cpio->fname);
+		die("%s: %s: meager hardlink set", cpio->rpmbname, ent->fname);
 	    if (ent->mode != cpio->hard.mode)
-		die("%s: %s: fickle hardlink mode", cpio->rpmbname, cpio->fname);
+		die("%s: %s: fickle hardlink mode", cpio->rpmbname, ent->fname);
 	    if (ent->nlink != cpio->hard.nlink)
-		die("%s: %s: fickle nlink", cpio->rpmbname, cpio->fname);
+		die("%s: %s: fickle nlink", cpio->rpmbname, ent->fname);
 	    cpio->hard.cnt++;
 	}
 	// Non-last hardlink?
@@ -257,34 +321,32 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	    // files can have hardlinks.
 	    if (S_ISLNK(ent->mode)) {
 		if (0)
-		    warn("%s: %s: hardlinked symlink", cpio->rpmbname, cpio->fname);
+		    warn("%s: %s: hardlinked symlink", cpio->rpmbname, ent->fname);
 		cpio->endpos = cpio->curpos;
 		ent->size = 0;
 	    }
 	    // All but the last hardlink in a set must come with no data.
 	    else if (ent->size)
-		die("%s: %s: non-empty hardlink data", cpio->rpmbname, cpio->fname);
+		die("%s: %s: non-empty hardlink data", cpio->rpmbname, ent->fname);
 	}
     }
     // Not a hardlink in the middle of the set?
     else if (cpio->hard.cnt)
-	die("%s: %s: meager hardlink set", cpio->rpmbname, cpio->fname);
+	die("%s: %s: meager hardlink set", cpio->rpmbname, ent->fname);
 
     // Validate the size of symlink target.
     if (S_ISLNK(ent->mode)) {
 	if (ent->size == 0 && cpio->hard.cnt == cpio->hard.nlink)
-	    die("%s: %s: zero-length symlink target", cpio->rpmbname, cpio->fname);
+	    die("%s: %s: zero-length symlink target", cpio->rpmbname, ent->fname);
 	if (ent->size >= PATH_MAX)
-	    die("%s: %s: symlink target too long", cpio->rpmbname, cpio->fname);
+	    die("%s: %s: symlink target too long", cpio->rpmbname, ent->fname);
     }
 
-    return &cpio->ent;
+    return ent;
 }
 
 size_t rpmcpio_read(struct rpmcpio *cpio, void *buf, size_t n)
 {
-    assert(cpio->ent.no != -1);
-    assert(cpio->ent.packaged);
     assert(S_ISREG(cpio->ent.mode));
     assert(n > 0);
     unsigned long long left = cpio->endpos - cpio->curpos;
@@ -293,35 +355,24 @@ size_t rpmcpio_read(struct rpmcpio *cpio, void *buf, size_t n)
     if (n == 0)
 	return 0;
     if (zread(cpio, buf, n) != n)
-	die("%s: %s: cannot read cpio file data", cpio->rpmbname, cpio->fname);
+	die("%s: %s: cannot read cpio file data", cpio->rpmbname, cpio->ent.fname);
     cpio->curpos += n;
     return n;
 }
 
-size_t rpmcpio_readlink(struct rpmcpio *cpio, void *buf, size_t n)
+size_t rpmcpio_readlink(struct rpmcpio *cpio, char *buf)
 {
-    assert(cpio->ent.no != -1);
-    assert(cpio->ent.packaged);
     assert(S_ISLNK(cpio->ent.mode));
     assert(cpio->ent.size > 0); // hardlinked symlink? something of a curiosity
-    unsigned long long left = cpio->endpos - cpio->curpos;
-    assert(left == cpio->ent.size);
-    assert(n > cpio->ent.size);
-    n = left;
+    unsigned long long n = cpio->endpos - cpio->curpos;
+    struct cpioent *ent = &cpio->ent;
+    assert(n == ent->linklen);
     if (zread(cpio, buf, n) != n)
-	die("%s: %s: cannot read cpio symlink", cpio->rpmbname, cpio->fname);
+	die("%s: %s: cannot read cpio symlink", cpio->rpmbname, ent->fname);
     char *s = buf;
     s[n] = '\0';
     if (strlen(s) < n)
-	die("%s: %s: embedded null byte in cpio symlink", cpio->rpmbname, cpio->fname);
+	die("%s: %s: embedded null byte in cpio symlink", cpio->rpmbname, ent->fname);
     cpio->curpos += n;
     return n;
-}
-
-void rpmcpio_close(struct rpmcpio *cpio)
-{
-    zreader_fini(&cpio->z);
-    header_freedata(&cpio->h);
-    close(cpio->fda.fd);
-    free(cpio);
 }
