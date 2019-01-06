@@ -34,7 +34,7 @@
 struct rpmcpio {
     unsigned long long curpos; // current data pos
     unsigned long long endpos; // end data pos
-    struct { unsigned ino, mode, nlink, cnt; } hard;
+    struct hard { unsigned ino, mode, nlink, cnt; } hard;
     struct fda fda;
     char fdabuf[BUFSIZA];
     struct header h;
@@ -284,64 +284,68 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 
 gotent:;
     struct cpioent *ent = &cpio->ent;
-    cpio->endpos = cpio->curpos + ent->size;
+    struct hard *hard = &cpio->hard;
 
     // Finalizing an existing hardlink set.
-    if (cpio->hard.cnt && cpio->hard.cnt == cpio->hard.nlink) {
+    if (hard->cnt && hard->cnt == hard->nlink) {
 	// This new file is already not part of the preceding set.  Or is it?
-	if (ent->ino == cpio->hard.ino)
+	if (ent->ino == hard->ino)
 	    die("%s: %s: obese hardlink set", cpio->rpmbname, ent->fname);
-	cpio->hard.nlink = cpio->hard.cnt = 0;
+	hard->nlink = hard->cnt = 0;
     }
 
-    // So is it a hardlink?
+    // So is it a hardlink?  (With directories though, nlink has a special
+    // meaning: it accounts for subdirs which reference the dir back via "..".)
     if (!S_ISDIR(ent->mode) && ent->nlink > 1) {
+	// Old rpmbuild could package hardlinked symlinks, but such packages
+	// could not be installed.  Starting with rpm-4.6.0-rc1~93, only
+	// regular files can be packaged as hardlinks.  Forbidding hardlinked
+	// symlinks is a sensible option.  (Hardlinks are much less of a problem
+	// with file types other than regular files or symlinks, because there
+	// is no data attached to those other files.)
+	if (S_ISLNK(ent->mode))
+	    die("%s: %s: hardlinked symlink", cpio->rpmbname, ent->fname);
 	// Starting a new hardlink set?
-	if (cpio->hard.cnt == 0) {
+	if (hard->cnt == 0) {
 	    // E.g. ext4 has 16-bit i_links_count.
 	    if (ent->nlink > 0xffff)
 		die("%s: %s: bad nlink", cpio->rpmbname, ent->fname);
-	    cpio->hard.ino = ent->ino, cpio->hard.mode = ent->mode;
-	    cpio->hard.nlink = ent->nlink, cpio->hard.cnt = 1;
+	    hard->ino = ent->ino, hard->mode = ent->mode;
+	    hard->nlink = ent->nlink, hard->cnt = 1;
 	}
 	// Advancing in the existing hardlink set.
 	else {
-	    if (ent->ino != cpio->hard.ino)
+	    if (ent->ino != hard->ino)
 		die("%s: %s: meager hardlink set", cpio->rpmbname, ent->fname);
-	    if (ent->mode != cpio->hard.mode)
+	    if (ent->mode != hard->mode)
 		die("%s: %s: fickle hardlink mode", cpio->rpmbname, ent->fname);
-	    if (ent->nlink != cpio->hard.nlink)
+	    if (ent->nlink != hard->nlink)
 		die("%s: %s: fickle nlink", cpio->rpmbname, ent->fname);
-	    cpio->hard.cnt++;
+	    hard->cnt++;
 	}
 	// Non-last hardlink?
-	if (cpio->hard.cnt < cpio->hard.nlink) {
-	    // Symbolic links can be hardlinked, too.  With rpm-4.0, their size
-	    // was misleading.  Starting with rpm-4.6.0-rc1~93, only regular
-	    // files can have hardlinks.
-	    if (S_ISLNK(ent->mode)) {
-		if (0)
-		    warn("%s: %s: hardlinked symlink", cpio->rpmbname, ent->fname);
-		cpio->endpos = cpio->curpos;
+	if (hard->cnt < hard->nlink) {
+	    // With ffx[], we've got the actual file size, so reset it to zero.
+	    if (h->ffx)
 		ent->size = 0;
-	    }
 	    // All but the last hardlink in a set must come with no data.
 	    else if (ent->size)
 		die("%s: %s: non-empty hardlink data", cpio->rpmbname, ent->fname);
 	}
     }
     // Not a hardlink in the middle of the set?
-    else if (cpio->hard.cnt)
+    else if (hard->cnt)
 	die("%s: %s: meager hardlink set", cpio->rpmbname, ent->fname);
 
     // Validate the size of symlink target.
     if (S_ISLNK(ent->mode)) {
-	if (ent->size == 0 && cpio->hard.cnt == cpio->hard.nlink)
+	if (ent->size == 0)
 	    die("%s: %s: zero-length symlink target", cpio->rpmbname, ent->fname);
-	if (ent->size >= PATH_MAX)
+	if (ent->size >= 4096)
 	    die("%s: %s: symlink target too long", cpio->rpmbname, ent->fname);
     }
 
+    cpio->endpos = cpio->curpos + ent->size;
     return ent;
 }
 
@@ -363,7 +367,6 @@ size_t rpmcpio_read(struct rpmcpio *cpio, void *buf, size_t n)
 size_t rpmcpio_readlink(struct rpmcpio *cpio, char *buf)
 {
     assert(S_ISLNK(cpio->ent.mode));
-    assert(cpio->ent.size > 0); // hardlinked symlink? something of a curiosity
     unsigned long long n = cpio->endpos - cpio->curpos;
     struct cpioent *ent = &cpio->ent;
     assert(n == ent->linklen);
