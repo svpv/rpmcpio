@@ -532,8 +532,6 @@ compressor:
 	unsigned long long *longfsizes = tmp;
 	TakeArray(te, longfsizes, fileCount, "longfilesizes");
 	for (unsigned i = 0; i < fileCount; i++) {
-	    if (S_ISLNK(ffi[i].mode))
-		continue; // already set to target length
 	    unsigned long long longfsize = be64toh(longfsizes[i]);
 	    if (longfsize > 0xffffFFFFffffUL)
 		return ERR("bad longfilesizes");
