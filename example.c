@@ -19,7 +19,7 @@ $ ./example perl-version-0.99.18-5.fc27.x86_64.rpm
 
 static void process(const char *rpmfname)
 {
-    struct rpmcpio *cpio = rpmcpio_open(AT_FDCWD, rpmfname, NULL, false);
+    struct rpmcpio *cpio = rpmcpio_open(AT_FDCWD, rpmfname, NULL);
     const struct cpioent *ent;
     while ((ent = rpmcpio_next(cpio))) {
 	unsigned char buf[4];
