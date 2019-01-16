@@ -577,7 +577,8 @@ unsigned header_find(struct header *h, const char *fname, size_t flen)
     // (the exception being hardlinks), we expect the immediate hit.
     size_t at = ++h->prevFound;
     if (at >= h->fileCount) {
-	assert(h->fileCount > 0); // h->fileCount is 0 => don't call me
+	if (h->fileCount == 0)
+	    return -1;
 	at = (lo + hi) / 2;
     }
 
