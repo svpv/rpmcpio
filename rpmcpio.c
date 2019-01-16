@@ -112,24 +112,23 @@ static const signed char hex[256] = {
      -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
 };
 
-// Parse 4-digit hex number, returns > 0xffff on error.
-static inline unsigned hex4(const char *s)
+// Parse 4-digit hex number, returns < 0 on error.
+static inline int hex4(const char *s)
 {
-    unsigned u;
-    // hex[] values are sign-extended deliberately.
-    u  = hex[(unsigned char) s[0]] << 12;
-    u |= hex[(unsigned char) s[1]] << 8;
-    u |= hex[(unsigned char) s[2]] << 4;
-    u |= hex[(unsigned char) s[3]];
-    return u;
+    int v;
+    v  = hex[(unsigned char) s[0]] << 12;
+    v |= hex[(unsigned char) s[1]] << 8;
+    v |= hex[(unsigned char) s[2]] << 4;
+    v |= hex[(unsigned char) s[3]];
+    return v;
 }
 
 // Parse 8-digit hex number.
-static inline unsigned hex1(const char *s, const char *rpmbname)
+static inline unsigned hex8(const char *s, const char *rpmbname)
 {
-    unsigned hi = hex4(s);
-    unsigned lo = hex4(s + 4);
-    if (hi > 0xffff || lo > 0xffff)
+    int hi = hex4(s);
+    int lo = hex4(s + 4);
+    if ((hi | lo) < 0)
 	die("%s: bad cpio hex number", rpmbname);
     return hi << 16 | lo;
 }
@@ -178,7 +177,7 @@ static bool ent_01(struct rpmcpio *cpio, const char buf[110])
 	die("%s: bad cpio header magic", cpio->rpmbname);
     unsigned v[13];
     for (int i = 0; i < 13; i++)
-	v[i] = hex1(buf + 6 + 8 * i, cpio->rpmbname);
+	v[i] = hex8(buf + 6 + 8 * i, cpio->rpmbname);
     struct cpioent *ent = &cpio->ent;
     ent->ino = v[0];
     if (v[1] > 0xffff) die("%s: bad cpio mode", cpio->rpmbname);
@@ -259,7 +258,7 @@ const struct cpioent *rpmcpio_next(struct rpmcpio *cpio)
 	    die("%s: cannot read cpio header", cpio->rpmbname);
 	if (memcmp(cpio->buf + skip, "07070X", 6) == 0) {
 	    cpio->curpos = nextpos + 16;
-	    ent_0X(cpio, hex1(cpio->buf + skip + 6, cpio->rpmbname));
+	    ent_0X(cpio, hex8(cpio->buf + skip + 6, cpio->rpmbname));
 	    goto gotent;
 	}
 	// At least the trailer is still "070701", so read the rest.
