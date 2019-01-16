@@ -63,7 +63,7 @@ struct cpioent {
 	unsigned long long linklen;
     };
     // Filename length: fnamelen = strlen(fname) < PATH_MAX = 4096.
-    unsigned fnamelen;
+    size_t fnamelen;
     // The filename of the entry, null-terminated.  Source packages have
     // basename-only filenames with no slashes in them.  Binary packages have
     // absolute pathnames which start with '/'.
