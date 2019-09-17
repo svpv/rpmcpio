@@ -533,7 +533,7 @@ compressor:
 	TakeArray(te, longfsizes, fileCount, "longfilesizes");
 	for (unsigned i = 0; i < fileCount; i++) {
 	    unsigned long long longfsize = be64toh(longfsizes[i]);
-	    if (longfsize > 0xffffFFFFffffUL)
+	    if (longfsize > 0xffffFFFFffffULL)
 		return ERR("bad longfilesizes");
 	    ffx[i].size = longfsize;
 	}
